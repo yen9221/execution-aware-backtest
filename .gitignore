@@ -1,21 +1,50 @@
-# Ignore virtual environment and artifacts
+# Virtual environments
+.venv/
+
+# Python caches and tooling
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Coverage
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
+
+# Builds and packaging
 build/
 dist/
 *.egg-info/
+
+# Notebooks
 .ipynb_checkpoints/
+
+# Local environments, credentials, and secrets
 .env
 .env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.*
+
+# IDE and OS-local files
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-.venv/
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*~
+
+# Local agent tooling
+.agents/
+
+# Local review evidence
 artifacts/codex_review/

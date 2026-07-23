@@ -1,0 +1,32 @@
+# Execution-Aware Backtest
+
+Execution-Aware Backtest is a portfolio-level execution simulation prototype. The repository is currently at the foundation stage only: it provides packaging, project guidance, directory structure, and a small synthetic fixture, but no backtest implementation.
+
+The planned timing convention is to generate signals at a bar close and permit execution only at the next bar open. Same-bar close execution and execution of final-bar signals are non-goals.
+
+## Setup
+
+Python 3.11 or newer is required. From the repository root, use the existing virtual environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+.\.venv\Scripts\python.exe -c "import backtest; print(backtest.__version__)"
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+## Repository structure
+
+- `src/backtest/`: installable Python package (currently metadata only)
+- `tests/fixtures/`: deterministic synthetic test data
+- `config/`: future scenario configuration
+- `data/raw/`, `data/processed/`, `data/metadata/`: future local data organization
+- `notebooks/`: optional exploration, not source-of-truth logic
+- `scripts/`: future task-specific scripts
+- `results/`: future generated results
+- `artifacts/codex_review/`: ignored local review evidence
+
+`tests/fixtures/simple_bars.csv` is synthetic and does not reproduce real market data.
+
+## Not implemented
+
+Strategies, orders, events, fills, execution logic, portfolio accounting, an engine loop, metrics, configuration loading, a command-line interface, notebooks, market-data ingestion, and backtest results are not implemented. Production readiness and profitability assessment are outside the current scope.
