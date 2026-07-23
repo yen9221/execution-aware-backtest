@@ -1,0 +1,21 @@
+# Ignore virtual environment and artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.ipynb_checkpoints/
+.env
+.env.*
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+.venv/
+artifacts/codex_review/
