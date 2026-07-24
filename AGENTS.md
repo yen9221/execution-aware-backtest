@@ -15,6 +15,7 @@
 - Never execute a close-generated signal on that same bar's close.
 - A signal generated on the final bar must not be executed.
 - Never access future bars when producing a signal or decision.
+- At each bar, process the pending prior-bar target at the current open before recording the current close snapshot and creating the current bar's next target.
 - Do not silently forward-fill missing OHLC bars. Missing intervals must remain explicit or be handled by a documented, tested policy.
 
 ## Costs, fills, and accounting
