@@ -196,16 +196,17 @@ def market_order_for_target_weight_at_open(
     pending_target: PendingTargetWeight,
     execution_bar_timestamp: datetime,
     reference_open: float,
+    fee_rate: float,
+    slippage_rate: float,
 ) -> MarketOrder | None:
-    """Size a zero-cost delta order from an execution-open portfolio mark.
+    """Size a cost-aware delta order from an execution-open portfolio mark.
 
     The target is applied to pre-trade portfolio value at ``reference_open``.
     This function creates no fill and does not mutate or update the portfolio.
-    Fees, slippage, tolerances, and minimum notionals are intentionally absent.
-    A zero-value portfolio returns no order because it has no capital to
-    allocate. A buy is capped at zero-cost affordability; only when multiplying
-    that capped quantity back by the open would overspend is it moved one float
-    step toward zero.
+    Adverse slippage and proportional fees limit buy affordability but do not
+    redefine the reference-open target exposure. Tolerances and minimum
+    notionals are intentionally absent. A zero-value portfolio returns no order
+    because it has no capital to allocate.
     """
 
     if not isinstance(state, PortfolioState):
@@ -245,6 +246,14 @@ def market_order_for_target_weight_at_open(
             f"reference_open must be strictly positive, got {reference!r}"
         )
 
+    fee_rate_value = _nonnegative_number("fee_rate", fee_rate)
+    slippage_rate_value = _finite_number("slippage_rate", slippage_rate)
+    if not 0 <= slippage_rate_value < 1:
+        raise PositioningError(
+            "slippage_rate must satisfy 0 <= slippage_rate < 1, "
+            f"got {slippage_rate_value!r}"
+        )
+
     current_asset_value = _finite_calculation(
         "current_asset_value", position * reference
     )
@@ -272,12 +281,42 @@ def market_order_for_target_weight_at_open(
         raw_quantity = _finite_calculation(
             "raw buy quantity", delta_asset_value / reference
         )
+        expected_fill_price = reference * (1 + slippage_rate_value)
+        effective_unit_cost = _finite_calculation(
+            "effective buy unit cost",
+            expected_fill_price * (1 + fee_rate_value),
+        )
+        if effective_unit_cost <= 0:
+            raise PositioningError(
+                "calculated effective buy unit cost must be strictly positive, "
+                f"got {effective_unit_cost!r}"
+            )
         maximum_quantity = _finite_calculation(
-            "maximum affordable quantity", cash / reference
+            "maximum affordable quantity", cash / effective_unit_cost
         )
         quantity = min(raw_quantity, maximum_quantity)
-        if quantity * reference > cash:
+
+        expected_notional = _finite_calculation(
+            "expected buy notional", quantity * expected_fill_price
+        )
+        expected_fee = _finite_calculation(
+            "expected buy fee", expected_notional * fee_rate_value
+        )
+        expected_cash_outflow = _finite_calculation(
+            "expected buy cash outflow", expected_notional + expected_fee
+        )
+        if expected_cash_outflow > cash:
             quantity = math.nextafter(quantity, 0.0)
+            expected_notional = _finite_calculation(
+                "adjusted expected buy notional", quantity * expected_fill_price
+            )
+            expected_fee = _finite_calculation(
+                "adjusted expected buy fee", expected_notional * fee_rate_value
+            )
+            expected_cash_outflow = _finite_calculation(
+                "adjusted expected buy cash outflow",
+                expected_notional + expected_fee,
+            )
         side = Side.BUY
     else:
         raw_quantity = _finite_calculation(
@@ -291,9 +330,9 @@ def market_order_for_target_weight_at_open(
             "calculated order quantity must be finite and strictly positive, "
             f"got {quantity!r}"
         )
-    if side is Side.BUY and quantity * reference > cash:
+    if side is Side.BUY and expected_cash_outflow > cash:
         raise PositioningError(
-            "calculated buy quantity exceeds zero-cost affordability after "
+            "calculated buy quantity exceeds cost-aware affordability after "
             "the conservative float adjustment"
         )
     if side is Side.SELL and quantity > position:

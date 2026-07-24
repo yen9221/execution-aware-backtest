@@ -21,9 +21,10 @@
 ## Costs, fills, and accounting
 
 - `TargetWeight` is constrained to `[0, 1]`; fractional weights are valid target representations but must not be silently coerced into the current binary execution path.
-- Target-weight rebalance sizing uses pre-trade portfolio value marked at the observable execution-bar open.
+- Continuous target-weight rebalance sizing uses pre-trade portfolio value marked at the observable execution-bar open.
+- BUY affordability must account for adverse slippage and proportional fees using formulas consistent with execution.
+- Transaction costs may cause realized post-trade weight to differ from the intended target.
 - Positioning returns a delta order only; execution and portfolio accounting remain separate.
-- The initial partial-rebalance primitive is zero-cost sizing. Fee-aware and slippage-aware target sizing are separate later work.
 - Keep fees and slippage separately traceable in records and results.
 - Buy-side slippage increases the fill price; sell-side slippage decreases it.
 - Track cash, position quantity, and portfolio value explicitly.

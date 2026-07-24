@@ -677,12 +677,16 @@ def convert_weight(
     pending_target: PendingTargetWeight | None = None,
     execution_bar_timestamp: datetime = EXECUTION_AT,
     reference_open: float = REFERENCE_OPEN,
+    fee_rate: float = 0.0,
+    slippage_rate: float = 0.0,
 ) -> MarketOrder | None:
     return market_order_for_target_weight_at_open(
         state=state,
         pending_target=pending_target or pending_weight(weight),
         execution_bar_timestamp=execution_bar_timestamp,
         reference_open=reference_open,
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
     )
 
 
@@ -772,6 +776,8 @@ def test_weight_converter_rejects_invalid_state_and_pending_types() -> None:
             pending_target=pending_weight(),
             execution_bar_timestamp=EXECUTION_AT,
             reference_open=REFERENCE_OPEN,
+            fee_rate=0.0,
+            slippage_rate=0.0,
         )
     with pytest.raises(PositioningError, match="PendingTargetWeight"):
         market_order_for_target_weight_at_open(
@@ -779,6 +785,8 @@ def test_weight_converter_rejects_invalid_state_and_pending_types() -> None:
             pending_target=pending(),  # type: ignore[arg-type]
             execution_bar_timestamp=EXECUTION_AT,
             reference_open=REFERENCE_OPEN,
+            fee_rate=0.0,
+            slippage_rate=0.0,
         )
 
 
@@ -1002,3 +1010,210 @@ def test_central_post_trade_accounting_at_zero_costs(weight: float) -> None:
     assert final.cumulative_fees == 2.0
     assert value == pytest.approx(1000.0)
     assert final.position_quantity * REFERENCE_OPEN / value == pytest.approx(weight)
+
+
+def test_continuous_cost_arguments_are_required_keyword_only() -> None:
+    kwargs = {
+        "state": PortfolioState(cash=1000.0),
+        "pending_target": pending_weight(0.5),
+        "execution_bar_timestamp": EXECUTION_AT,
+        "reference_open": REFERENCE_OPEN,
+    }
+    with pytest.raises(TypeError, match="fee_rate"):
+        market_order_for_target_weight_at_open(**kwargs, slippage_rate=0.0)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="slippage_rate"):
+        market_order_for_target_weight_at_open(**kwargs, fee_rate=0.0)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("fee_rate", [0.0, 0.01, 1.0])
+def test_continuous_valid_fee_rates_are_accepted(fee_rate: float) -> None:
+    assert convert_weight(PortfolioState(cash=1000.0), fee_rate=fee_rate) is not None
+
+
+@pytest.mark.parametrize(
+    "fee_rate",
+    [-0.01, True, "0.01", None, float("nan"), float("inf"), float("-inf")],
+)
+def test_continuous_invalid_fee_rates_are_rejected(fee_rate: object) -> None:
+    with pytest.raises(PositioningError, match="fee_rate"):
+        convert_weight(
+            PortfolioState(cash=1000.0), fee_rate=fee_rate  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("slippage_rate", [0.0, 0.02, math.nextafter(1.0, 0.0)])
+def test_continuous_valid_slippage_rates_are_accepted(
+    slippage_rate: float,
+) -> None:
+    assert (
+        convert_weight(
+            PortfolioState(cash=1000.0), slippage_rate=slippage_rate
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize(
+    "slippage_rate",
+    [
+        -0.01,
+        1.0,
+        1.01,
+        True,
+        "0.02",
+        None,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+    ],
+)
+def test_continuous_invalid_slippage_rates_are_rejected(
+    slippage_rate: object,
+) -> None:
+    with pytest.raises(PositioningError, match="slippage_rate"):
+        convert_weight(
+            PortfolioState(cash=1000.0),
+            slippage_rate=slippage_rate,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("reference_open", "fee_rate", "slippage_rate"),
+    [(100.0, 1e308, 0.02), (1e308, 0.0, 0.9)],
+)
+def test_non_finite_effective_buy_unit_cost_is_rejected(
+    reference_open: float, fee_rate: float, slippage_rate: float
+) -> None:
+    with pytest.raises(PositioningError, match="effective buy unit cost.*finite"):
+        convert_weight(
+            PortfolioState(cash=600.0),
+            1.0,
+            reference_open=reference_open,
+            fee_rate=fee_rate,
+            slippage_rate=slippage_rate,
+        )
+
+
+def execute_cost_aware_central(weight: float):
+    initial = PortfolioState(cash=600.0, position_quantity=4.0)
+    order = convert_weight(
+        initial,
+        weight,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+    )
+    if order is None:
+        return initial, None, None, initial
+    fill = execute_market_order(
+        order,
+        executed_at=EXECUTION_AT,
+        reference_price=REFERENCE_OPEN,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+    )
+    return initial, order, fill, apply_fill(initial, fill)
+
+
+def test_cost_aware_central_partial_buy_execution_and_accounting() -> None:
+    initial, order, fill, final = execute_cost_aware_central(0.70)
+    assert order == MarketOrder(DECISION_AT, Side.BUY, 3.0)
+    assert fill is not None
+    assert fill.fill_price == 102.0
+    assert fill.notional == 306.0
+    assert fill.fee == pytest.approx(3.06)
+    assert fill.cash_flow == pytest.approx(-309.06)
+    assert final.cash == pytest.approx(290.94)
+    assert final.position_quantity == 7.0
+    assert final.cumulative_fees == pytest.approx(3.06)
+    final_value = final.cash + final.position_quantity * REFERENCE_OPEN
+    realized_weight = final.position_quantity * REFERENCE_OPEN / final_value
+    assert final_value == pytest.approx(990.94)
+    assert final_value == pytest.approx(1000.0 + fill.cash_flow + 300.0)
+    assert math.isfinite(realized_weight)
+    assert 0.0 <= realized_weight <= 1.0
+    assert realized_weight != pytest.approx(0.70)
+    assert initial == PortfolioState(cash=600.0, position_quantity=4.0)
+
+
+def test_cost_aware_full_buy_is_capped_and_affordable() -> None:
+    initial, order, fill, final = execute_cost_aware_central(1.0)
+    assert order is not None and fill is not None
+    maximum = initial.cash / (REFERENCE_OPEN * 1.02 * 1.01)
+    assert order.side is Side.BUY
+    assert order.quantity == pytest.approx(maximum)
+    assert order.quantity < 6.0
+    assert -fill.cash_flow <= initial.cash
+    assert final.cash >= 0
+    assert final.position_quantity > initial.position_quantity
+    realized = final.position_quantity * REFERENCE_OPEN / (
+        final.cash + final.position_quantity * REFERENCE_OPEN
+    )
+    assert 0.0 <= realized <= 1.0
+
+
+def test_cost_aware_buy_nextafter_is_conditional_and_deterministic() -> None:
+    state = PortfolioState(cash=0.1)
+    raw_maximum = state.cash / (0.1 * 1.001)
+    first = convert_weight(state, 1.0, reference_open=0.1, fee_rate=0.001)
+    second = convert_weight(state, 1.0, reference_open=0.1, fee_rate=0.001)
+    unbound = convert_weight(
+        PortfolioState(cash=600.0, position_quantity=4.0),
+        0.70,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+    )
+    assert first == second
+    assert first is not None
+    assert first.quantity == math.nextafter(raw_maximum, 0.0)
+    assert first.quantity * 0.1 + first.quantity * 0.1 * 0.001 <= state.cash
+    assert unbound is not None and unbound.quantity == 3.0
+
+
+def test_cost_aware_central_partial_sell_execution_and_accounting() -> None:
+    initial, order, fill, final = execute_cost_aware_central(0.25)
+    assert order == MarketOrder(DECISION_AT, Side.SELL, 1.5)
+    assert fill is not None
+    assert fill.fill_price == 98.0
+    assert fill.notional == 147.0
+    assert fill.fee == pytest.approx(1.47)
+    assert fill.cash_flow == pytest.approx(145.53)
+    assert final == PortfolioState(
+        cash=pytest.approx(745.53),
+        position_quantity=2.5,
+        cumulative_fees=pytest.approx(1.47),
+    )
+    final_value = final.cash + final.position_quantity * REFERENCE_OPEN
+    assert final_value == pytest.approx(995.53)
+    assert final_value < 1000.0
+    assert order.quantity <= initial.position_quantity
+
+
+def test_cost_aware_full_sell_does_not_create_short_position() -> None:
+    _, order, fill, final = execute_cost_aware_central(0.0)
+    assert order == MarketOrder(DECISION_AT, Side.SELL, 4.0)
+    assert fill is not None
+    assert final.cash == pytest.approx(988.08)
+    assert final.position_quantity == 0.0
+    assert final.cumulative_fees == pytest.approx(3.92)
+
+
+def test_cost_aware_exact_target_creates_no_trade_or_cost() -> None:
+    initial, order, fill, final = execute_cost_aware_central(0.4)
+    assert order is None
+    assert fill is None
+    assert final is initial
+    assert final.cumulative_fees == 0.0
+
+
+def test_continuous_positioning_source_preserves_responsibility_boundaries() -> None:
+    source = inspect.getsource(
+        positioning_module.market_order_for_target_weight_at_open
+    )
+    for forbidden in (
+        "execute_market_order",
+        "apply_fill",
+        "Fill(",
+        "summarize_backtest",
+        "build_trade_log",
+    ):
+        assert forbidden not in source
