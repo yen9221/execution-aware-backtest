@@ -16,6 +16,9 @@
 - A signal generated on the final bar must not be executed.
 - Never access future bars when producing a signal or decision.
 - At each bar, process the pending prior-bar target at the current open before recording the current close snapshot and creating the current bar's next target.
+- Binary and continuous-weight engine entry points remain explicit and separate.
+- A continuous target created after bar `t` may execute only at bar `t+1` open; the final continuous target remains unexecuted without a later bar.
+- The continuous engine delegates sizing, rebalance tolerance, and minimum-notional filtering to positioning.
 - Do not silently forward-fill missing OHLC bars. Missing intervals must remain explicit or be handled by a documented, tested policy.
 
 ## Costs, fills, and accounting
@@ -35,6 +38,12 @@
 - Buy-side slippage increases the fill price; sell-side slippage decreases it.
 - Track cash, position quantity, and portfolio value explicitly.
 - Repeated target positions must not create unnecessary trades when the current position already matches the target.
+
+## Reporting invariants
+
+- Reporting remains target-type agnostic and operates from actual fills and portfolio snapshots.
+- Intended target weights must not be substituted for realized portfolio exposure.
+- Binary and continuous-weight results use the same reporting definitions.
 
 ## Future scenario assumptions
 

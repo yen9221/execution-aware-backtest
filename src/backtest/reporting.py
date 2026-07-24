@@ -8,8 +8,13 @@ small set of descriptive, whole-period diagnostics.
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Protocol
 
-from backtest.engine import BacktestResult, PortfolioSnapshot
+from backtest.engine import (
+    BacktestResult,
+    PortfolioSnapshot,
+    TargetWeightBacktestResult,
+)
 from backtest.execution import Fill
 from backtest.orders import Side
 from backtest.portfolio import PortfolioState
@@ -19,6 +24,15 @@ _TOLERANCE = 1e-12
 
 class ReportingError(ValueError):
     """Raised when a result cannot be reported without ambiguity."""
+
+
+class ReportingResult(Protocol):
+    """Completed-result fields required by deterministic reporting."""
+
+    initial_state: PortfolioState
+    final_state: PortfolioState
+    fills: tuple[Fill, ...]
+    portfolio_history: tuple[PortfolioSnapshot, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,9 +66,12 @@ class BacktestSummary:
     average_exposure: float
 
 
-def _require_result(result: object) -> BacktestResult:
-    if not isinstance(result, BacktestResult):
-        raise ReportingError(f"result must be a BacktestResult, got {result!r}")
+def _require_result(result: object) -> ReportingResult:
+    if not isinstance(result, (BacktestResult, TargetWeightBacktestResult)):
+        raise ReportingError(
+            "result must be a BacktestResult or TargetWeightBacktestResult, "
+            f"got {result!r}"
+        )
     return result
 
 
@@ -106,7 +123,9 @@ def _finite_sum(field: str, values: tuple[float, ...]) -> float:
     return total
 
 
-def _validated_fills(result: BacktestResult) -> tuple[tuple[Fill, datetime, datetime], ...]:
+def _validated_fills(
+    result: ReportingResult,
+) -> tuple[tuple[Fill, datetime, datetime], ...]:
     if not isinstance(result.fills, tuple):
         raise ReportingError("result.fills must be a tuple")
 
@@ -142,7 +161,9 @@ def _validated_fills(result: BacktestResult) -> tuple[tuple[Fill, datetime, date
     return tuple(validated)
 
 
-def _validated_history(result: BacktestResult) -> tuple[tuple[PortfolioSnapshot, datetime], ...]:
+def _validated_history(
+    result: ReportingResult,
+) -> tuple[tuple[PortfolioSnapshot, datetime], ...]:
     if not isinstance(result.portfolio_history, tuple):
         raise ReportingError("result.portfolio_history must be a tuple")
     if not result.portfolio_history:
@@ -221,7 +242,7 @@ def _reconcile_final_snapshot(
             )
 
 
-def build_trade_log(result: BacktestResult) -> tuple[TradeRecord, ...]:
+def build_trade_log(result: ReportingResult) -> tuple[TradeRecord, ...]:
     """Return one immutable normalized record per fill, preserving fill order.
 
     Numeric fields are copied directly. Timestamps retain their instants and are
@@ -245,7 +266,7 @@ def build_trade_log(result: BacktestResult) -> tuple[TradeRecord, ...]:
     )
 
 
-def summarize_backtest(result: BacktestResult) -> BacktestSummary:
+def summarize_backtest(result: ReportingResult) -> BacktestSummary:
     """Calculate deterministic descriptive metrics from an immutable result.
 
     Initial value marks the initial cash and position at the first snapshot's

@@ -1,14 +1,23 @@
+import inspect
+import math
 from dataclasses import FrozenInstanceError, fields, replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from backtest.engine import BacktestResult, PortfolioSnapshot, run_backtest
+import backtest.reporting as reporting_module
+from backtest.engine import (
+    BacktestResult,
+    PortfolioSnapshot,
+    TargetWeightBacktestResult,
+    run_backtest,
+    run_target_weight_backtest,
+)
 from backtest.events import Bar
 from backtest.execution import Fill
 from backtest.orders import Side
 from backtest.portfolio import PortfolioState
-from backtest.positioning import TargetPosition
+from backtest.positioning import TargetPosition, TargetWeight
 from backtest.reporting import (
     BacktestSummary,
     ReportingError,
@@ -593,3 +602,233 @@ def test_falling_price_engine_scenario_has_negative_return_and_drawdown() -> Non
     assert summary.final_portfolio_value == pytest.approx(800.0)
     assert summary.cumulative_return == pytest.approx(-0.2)
     assert summary.max_drawdown == pytest.approx(-0.2)
+
+
+def fractional_result_zero_cost() -> TargetWeightBacktestResult:
+    source_bars = bars(
+        [(100.0, 101.0), (102.0, 103.0), (104.0, 105.0), (106.0, 107.0), (108.0, 109.0)]
+    )
+    return run_target_weight_backtest(
+        bars=source_bars,
+        targets=[TargetWeight(value) for value in (0.0, 0.5, 0.8, 0.3, 0.0)],
+        initial_state=PortfolioState(cash=1_000.0),
+        fee_rate=0.0,
+        slippage_rate=0.0,
+        rebalance_tolerance=0.0,
+        minimum_trade_notional=0.0,
+    )
+
+
+def fractional_result_cost_aware() -> TargetWeightBacktestResult:
+    source_bars = bars([(100.0, 101.0)] * 6)
+    return run_target_weight_backtest(
+        bars=source_bars,
+        targets=[
+            TargetWeight(value)
+            for value in (0.4, 0.405, 0.42, 0.7, 0.25, 0.0)
+        ],
+        initial_state=PortfolioState(cash=600.0, position_quantity=4.0),
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+        minimum_trade_notional=21.0,
+    )
+
+
+def independently_calculated_summary(result: TargetWeightBacktestResult) -> dict[str, float | int]:
+    first_close = result.portfolio_history[0].close_price
+    initial_value = (
+        result.initial_state.cash
+        + result.initial_state.position_quantity * first_close
+    )
+    final_value = result.portfolio_history[-1].portfolio_value
+    peak = 0.0
+    maximum_drawdown = 0.0
+    exposures: list[float] = []
+    for item in result.portfolio_history:
+        peak = max(peak, item.portfolio_value)
+        maximum_drawdown = min(
+            maximum_drawdown, item.portfolio_value / peak - 1.0
+        )
+        exposures.append(
+            item.position_quantity * item.close_price / item.portfolio_value
+        )
+    return {
+        "initial": initial_value,
+        "final": final_value,
+        "return": final_value / initial_value - 1.0,
+        "drawdown": maximum_drawdown,
+        "fees": sum(item.fee for item in result.fills),
+        "trades": len(result.fills),
+        "buys": sum(item.side is Side.BUY for item in result.fills),
+        "sells": sum(item.side is Side.SELL for item in result.fills),
+        "turnover": sum(item.notional for item in result.fills) / initial_value,
+        "exposure": math.fsum(exposures) / len(exposures),
+    }
+
+
+def test_reporting_public_functions_accept_both_result_types() -> None:
+    binary = run_backtest(
+        bars=bars([(100.0, 100.0)]),
+        targets=[TargetPosition.CASH],
+        initial_state=PortfolioState(cash=1000.0),
+        fee_rate=0.0,
+        slippage_rate=0.0,
+    )
+    fractional = fractional_result_zero_cost()
+    assert isinstance(build_trade_log(binary), tuple)
+    assert isinstance(build_trade_log(fractional), tuple)
+    assert type(summarize_backtest(binary)) is BacktestSummary
+    assert type(summarize_backtest(fractional)) is BacktestSummary
+
+
+def test_fractional_trade_log_matches_actual_fills_exactly() -> None:
+    engine_result = fractional_result_zero_cost()
+    original_result = replace(engine_result)
+    original_fills = tuple(replace(item) for item in engine_result.fills)
+    trade_log = build_trade_log(engine_result)
+    assert len(trade_log) == len(engine_result.fills) == 3
+    assert [record.side for record in trade_log] == [
+        Side.BUY,
+        Side.BUY,
+        Side.SELL,
+    ]
+    for record, source in zip(trade_log, engine_result.fills, strict=True):
+        assert record == TradeRecord(
+            decision_bar_timestamp=source.order_created_at,
+            execution_timestamp=source.executed_at,
+            side=source.side,
+            quantity=source.quantity,
+            reference_price=source.reference_price,
+            fill_price=source.fill_price,
+            notional=source.notional,
+            fee=source.fee,
+            cash_flow=source.cash_flow,
+        )
+    assert engine_result == original_result
+    assert engine_result.fills == original_fills
+
+
+def test_fractional_zero_cost_summary_matches_independent_calculation() -> None:
+    engine_result = fractional_result_zero_cost()
+    expected = independently_calculated_summary(engine_result)
+    summary = summarize_backtest(engine_result)
+    assert summary.initial_portfolio_value == pytest.approx(expected["initial"])
+    assert summary.final_portfolio_value == pytest.approx(expected["final"])
+    assert summary.cumulative_return == pytest.approx(expected["return"])
+    assert summary.max_drawdown == pytest.approx(expected["drawdown"])
+    assert summary.total_fees == pytest.approx(expected["fees"])
+    assert summary.trade_count == expected["trades"]
+    assert summary.buy_count == expected["buys"]
+    assert summary.sell_count == expected["sells"]
+    assert summary.turnover == pytest.approx(expected["turnover"])
+    assert summary.average_exposure == pytest.approx(expected["exposure"])
+
+
+def test_fractional_cost_aware_summary_uses_actual_fills_and_snapshots() -> None:
+    engine_result = fractional_result_cost_aware()
+    expected = independently_calculated_summary(engine_result)
+    trade_log = build_trade_log(engine_result)
+    summary = summarize_backtest(engine_result)
+    assert len(engine_result.fills) == len(trade_log) == summary.trade_count == 2
+    assert [record.side for record in trade_log] == [Side.BUY, Side.SELL]
+    assert summary.total_fees == pytest.approx(
+        sum(item.fee for item in engine_result.fills)
+    )
+    assert summary.total_fees == pytest.approx(expected["fees"])
+    assert summary.turnover == pytest.approx(expected["turnover"])
+    assert summary.final_portfolio_value == pytest.approx(expected["final"])
+    assert summary.cumulative_return == pytest.approx(expected["return"])
+    assert summary.max_drawdown == pytest.approx(expected["drawdown"])
+    assert summary.average_exposure == pytest.approx(expected["exposure"])
+
+
+def test_fractional_exposure_uses_realized_holdings_not_target_weight() -> None:
+    engine_result = fractional_result_cost_aware()
+    snapshot_after_buy = engine_result.portfolio_history[4]
+    realized = (
+        snapshot_after_buy.position_quantity * snapshot_after_buy.close_price
+        / snapshot_after_buy.portfolio_value
+    )
+    intended = 0.7
+    assert realized != pytest.approx(intended)
+    all_exposures = [
+        item.position_quantity * item.close_price / item.portfolio_value
+        for item in engine_result.portfolio_history
+    ]
+    assert summarize_backtest(engine_result).average_exposure == pytest.approx(
+        math.fsum(all_exposures) / len(all_exposures)
+    )
+
+
+def test_suppressed_and_final_targets_create_no_reporting_records() -> None:
+    engine_result = fractional_result_cost_aware()
+    assert len(engine_result.fills) == 2
+    assert len(build_trade_log(engine_result)) == 2
+    assert engine_result.unexecuted_final_target is not None
+    assert all(
+        item.order_created_at
+        != engine_result.unexecuted_final_target.decision_bar_timestamp
+        for item in engine_result.fills
+    )
+    summary = summarize_backtest(engine_result)
+    assert summary.trade_count == 2
+    assert summary.total_fees == pytest.approx(
+        engine_result.fills[0].fee + engine_result.fills[1].fee
+    )
+
+
+def test_unexecuted_fractional_target_contents_do_not_affect_reporting() -> None:
+    engine_result = fractional_result_zero_cost()
+    assert engine_result.unexecuted_final_target is not None
+    changed_pending = replace(
+        engine_result.unexecuted_final_target,
+        target=TargetWeight(1.0),
+    )
+    changed_result = replace(
+        engine_result,
+        unexecuted_final_target=changed_pending,
+    )
+    assert build_trade_log(changed_result) == build_trade_log(engine_result)
+    assert summarize_backtest(changed_result) == summarize_backtest(engine_result)
+
+
+def test_fractional_initial_fees_are_excluded_from_run_fees() -> None:
+    source_bars = bars([(100.0, 100.0), (100.0, 100.0)])
+    engine_result = run_target_weight_backtest(
+        bars=source_bars,
+        targets=[TargetWeight(0.5), TargetWeight(0.0)],
+        initial_state=PortfolioState(cash=1000.0, cumulative_fees=10.0),
+        fee_rate=0.01,
+        slippage_rate=0.0,
+        rebalance_tolerance=0.0,
+        minimum_trade_notional=0.0,
+    )
+    summary = summarize_backtest(engine_result)
+    assert summary.total_fees == pytest.approx(engine_result.fills[0].fee)
+    assert summary.total_fees == pytest.approx(
+        engine_result.final_state.cumulative_fees
+        - engine_result.initial_state.cumulative_fees
+    )
+
+
+def test_reporting_uses_one_shared_typed_implementation_without_target_routing() -> None:
+    source = inspect.getsource(reporting_module)
+    assert "class ReportingResult(Protocol)" in source
+    assert "TargetWeightBacktestResult" in source
+    assert "Any" not in source
+    assert "cast(" not in source
+    assert source.count("def build_trade_log(") == 1
+    assert source.count("def summarize_backtest(") == 1
+    for forbidden in (
+        "unexecuted_final_target.target",
+        "TargetPosition",
+        "from backtest.positioning",
+        "execute_market_order",
+        "apply_fill",
+        "run_backtest",
+        "run_target_weight_backtest",
+        "sharpe",
+        "benchmark",
+    ):
+        assert forbidden not in source

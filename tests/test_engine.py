@@ -6,12 +6,24 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import backtest.engine as engine_module
-from backtest.engine import BacktestResult, EngineError, PortfolioSnapshot, run_backtest
+from backtest.engine import (
+    BacktestResult,
+    EngineError,
+    PortfolioSnapshot,
+    TargetWeightBacktestResult,
+    run_backtest,
+    run_target_weight_backtest,
+)
 from backtest.events import Bar
 from backtest.execution import Fill
 from backtest.orders import MarketOrder, Side
 from backtest.portfolio import PortfolioState
-from backtest.positioning import PositioningError, TargetPosition
+from backtest.positioning import (
+    PendingTargetWeight,
+    PositioningError,
+    TargetPosition,
+    TargetWeight,
+)
 
 START = datetime(2024, 1, 1, tzinfo=timezone.utc)
 FEE_RATE = 0.001
@@ -670,3 +682,340 @@ def test_engine_source_uses_explicit_loop_without_queue_or_formula_helpers() -> 
     assert "fill_price" not in source
     assert "cash_flow" not in source
     assert "raw_quantity" not in source
+
+
+def run_weights(
+    bars: object,
+    targets: object,
+    *,
+    initial_state: object = PortfolioState(cash=1000.0),
+    fee_rate: object = 0.0,
+    slippage_rate: object = 0.0,
+    rebalance_tolerance: object = 0.0,
+    minimum_trade_notional: object = 0.0,
+) -> TargetWeightBacktestResult:
+    return run_target_weight_backtest(
+        bars=bars,  # type: ignore[arg-type]
+        targets=targets,  # type: ignore[arg-type]
+        initial_state=initial_state,  # type: ignore[arg-type]
+        fee_rate=fee_rate,  # type: ignore[arg-type]
+        slippage_rate=slippage_rate,  # type: ignore[arg-type]
+        rebalance_tolerance=rebalance_tolerance,  # type: ignore[arg-type]
+        minimum_trade_notional=minimum_trade_notional,  # type: ignore[arg-type]
+    )
+
+
+def fractional_bars() -> list[Bar]:
+    return [
+        bar(index, open_price=100.0 + 2.0 * index, close_price=101.0 + 2.0 * index)
+        for index in range(6)
+    ]
+
+
+def fractional_targets() -> list[TargetWeight]:
+    return [
+        TargetWeight(weight) for weight in (0.0, 0.5, 0.8, 0.3, 0.3, 0.0)
+    ]
+
+
+def test_fractional_engine_api_and_result_are_explicit_and_immutable() -> None:
+    assert callable(run_target_weight_backtest)
+    result = run_weights([bar()], [TargetWeight(0.5)])
+    assert type(result) is TargetWeightBacktestResult
+    assert isinstance(result.unexecuted_final_target, PendingTargetWeight)
+    with pytest.raises(FrozenInstanceError):
+        result.final_state = PortfolioState(cash=0.0)  # type: ignore[misc]
+    binary_signature = inspect.signature(run_backtest)
+    assert "rebalance_tolerance" not in binary_signature.parameters
+    assert "minimum_trade_notional" not in binary_signature.parameters
+
+
+@pytest.mark.parametrize(
+    "targets",
+    [[0.5], [TargetPosition.LONG], [object()]],
+)
+def test_fractional_engine_rejects_non_target_weight_elements(
+    targets: list[object],
+) -> None:
+    with pytest.raises(EngineError, match=r"targets\[0\].*TargetWeight"):
+        run_weights([bar()], targets)
+
+
+def test_binary_engine_rejects_fractional_target_weights() -> None:
+    with pytest.raises(EngineError, match="TargetPosition"):
+        run([bar()], [TargetWeight(0.5)])
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_fractional_target_count_must_equal_bar_count(count: int) -> None:
+    with pytest.raises(EngineError, match="targets length.*bars length"):
+        run_weights([bar()], [TargetWeight(0.5)] * count)
+
+
+def test_fractional_engine_empty_bars_follow_existing_policy() -> None:
+    with pytest.raises(EngineError, match="at least one"):
+        run_weights([], [])
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("fee_rate", -0.1, "fee_rate"),
+        ("fee_rate", True, "fee_rate"),
+        ("fee_rate", float("inf"), "fee_rate"),
+        ("slippage_rate", -0.1, "slippage_rate"),
+        ("slippage_rate", 1.0, "slippage_rate"),
+        ("slippage_rate", True, "slippage_rate"),
+        ("rebalance_tolerance", -0.1, "rebalance_tolerance"),
+        ("rebalance_tolerance", 1.1, "rebalance_tolerance"),
+        ("rebalance_tolerance", True, "rebalance_tolerance"),
+        ("minimum_trade_notional", -1.0, "minimum_trade_notional"),
+        ("minimum_trade_notional", True, "minimum_trade_notional"),
+        ("minimum_trade_notional", float("nan"), "minimum_trade_notional"),
+    ],
+)
+def test_fractional_engine_validates_controls(
+    field: str, value: object, message: str
+) -> None:
+    kwargs = {field: value}
+    with pytest.raises(EngineError, match=message):
+        run_weights([bar()], [TargetWeight(0.5)], **kwargs)
+
+
+def test_fractional_engine_does_not_mutate_bars_or_targets() -> None:
+    bars = fractional_bars()
+    targets = fractional_targets()
+    original_bars = list(bars)
+    original_targets = list(targets)
+    first = run_weights(bars, targets)
+    second = run_weights(bars, targets)
+    assert first == second
+    assert bars == original_bars
+    assert targets == original_targets
+
+
+def test_zero_cost_fractional_sequence_matches_visible_hand_calculation() -> None:
+    bars = fractional_bars()
+    targets = fractional_targets()
+    result = run_weights(bars, targets)
+
+    expected_cash = 1000.0
+    expected_position = 0.0
+    expected: list[tuple[datetime, datetime, Side, float, float]] = []
+    for execution_index in range(1, len(bars)):
+        target = targets[execution_index - 1].weight
+        execution_open = bars[execution_index].open
+        pre_trade_value = expected_cash + expected_position * execution_open
+        desired_asset_value = target * pre_trade_value
+        current_asset_value = expected_position * execution_open
+        delta_quantity = (desired_asset_value - current_asset_value) / execution_open
+        if delta_quantity != 0.0:
+            side = Side.BUY if delta_quantity > 0 else Side.SELL
+            quantity = abs(delta_quantity)
+            expected.append(
+                (
+                    bars[execution_index - 1].timestamp,
+                    bars[execution_index].timestamp,
+                    side,
+                    quantity,
+                    execution_open,
+                )
+            )
+            if side is Side.BUY:
+                expected_cash -= quantity * execution_open
+                expected_position += quantity
+            else:
+                expected_cash += quantity * execution_open
+                expected_position -= quantity
+
+    assert len(result.fills) == len(expected) == 4
+    for fill, (created_at, executed_at, side, quantity, execution_open) in zip(
+        result.fills, expected, strict=True
+    ):
+        assert fill.order_created_at == created_at
+        assert fill.executed_at == executed_at
+        assert fill.side is side
+        assert fill.quantity == pytest.approx(quantity)
+        assert fill.reference_price == execution_open
+        assert fill.fill_price == execution_open
+        assert fill.fee == 0.0
+    assert result.final_state.cash == pytest.approx(expected_cash)
+    assert result.final_state.position_quantity == pytest.approx(expected_position)
+    assert len(result.portfolio_history) == len(bars)
+    assert result.portfolio_history[0].position_quantity == 0.0
+    assert result.portfolio_history[1].position_quantity == 0.0
+
+
+def test_fractional_event_order_and_final_target_semantics() -> None:
+    bars = fractional_bars()
+    targets = fractional_targets()
+    result = run_weights(bars, targets)
+    assert [fill.executed_at for fill in result.fills] == [
+        bars[index].timestamp for index in (2, 3, 4, 5)
+    ]
+    assert [fill.order_created_at for fill in result.fills] == [
+        bars[index].timestamp for index in (1, 2, 3, 4)
+    ]
+    assert all(
+        fill.executed_at > fill.order_created_at for fill in result.fills
+    )
+    assert result.unexecuted_final_target == PendingTargetWeight(
+        decision_bar_timestamp=bars[-1].timestamp,
+        target=targets[-1],
+    )
+    assert all(
+        fill.order_created_at != bars[-1].timestamp for fill in result.fills
+    )
+
+
+def test_fractional_snapshot_occurs_after_open_execution_and_marks_close() -> None:
+    bars = fractional_bars()
+    result = run_weights(bars, fractional_targets())
+    assert len(result.portfolio_history) == len(bars)
+    for snapshot, source_bar in zip(result.portfolio_history, bars, strict=True):
+        assert snapshot.bar_timestamp == source_bar.timestamp
+        assert snapshot.close_price == source_bar.close
+        assert snapshot.portfolio_value == pytest.approx(
+            snapshot.cash + snapshot.position_quantity * source_bar.close
+        )
+    first_buy = result.fills[0]
+    execution_snapshot = result.portfolio_history[2]
+    assert execution_snapshot.cash == pytest.approx(1000.0 + first_buy.cash_flow)
+    assert execution_snapshot.position_quantity == pytest.approx(first_buy.quantity)
+
+
+def test_repeated_fractional_target_is_revalued_at_current_open() -> None:
+    result = run_weights(fractional_bars(), fractional_targets())
+    last_fill = result.fills[-1]
+    assert last_fill.order_created_at == fractional_bars()[4].timestamp
+    assert last_fill.executed_at == fractional_bars()[5].timestamp
+    assert last_fill.side is Side.SELL
+    assert last_fill.quantity > 0
+
+
+def test_fractional_endpoints_support_full_exit_and_affordable_full_buy() -> None:
+    bars = [bar(0, open_price=100.0), bar(1, open_price=100.0)]
+    buy = run_weights(
+        bars,
+        [TargetWeight(1.0), TargetWeight(0.0)],
+        fee_rate=0.01,
+        slippage_rate=0.02,
+    )
+    assert len(buy.fills) == 1
+    assert buy.fills[0].side is Side.BUY
+    assert -buy.fills[0].cash_flow <= 1000.0
+    assert buy.final_state.cash >= 0
+
+    sell = run_weights(
+        bars,
+        [TargetWeight(0.0), TargetWeight(1.0)],
+        initial_state=PortfolioState(cash=0.0, position_quantity=10.0),
+        fee_rate=0.01,
+        slippage_rate=0.02,
+    )
+    assert len(sell.fills) == 1
+    assert sell.fills[0].side is Side.SELL
+    assert sell.final_state.position_quantity == 0.0
+
+
+def test_fractional_cost_aware_filters_and_accounting() -> None:
+    bars = [bar(index, open_price=100.0, close_price=101.0) for index in range(6)]
+    targets = [TargetWeight(weight) for weight in (0.4, 0.405, 0.42, 0.7, 0.25, 0.0)]
+    initial = PortfolioState(cash=600.0, position_quantity=4.0)
+    result = run_weights(
+        bars,
+        targets,
+        initial_state=initial,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+        minimum_trade_notional=21.0,
+    )
+    assert [fill.side for fill in result.fills] == [Side.BUY, Side.SELL]
+    assert [fill.executed_at for fill in result.fills] == [
+        bars[4].timestamp,
+        bars[5].timestamp,
+    ]
+    buy, sell = result.fills
+    assert buy.fill_price == 102.0
+    assert sell.fill_price == 98.0
+    assert buy.quantity == 3.0
+    assert sell.quantity > 0
+    assert result.final_state.cash >= 0
+    assert result.final_state.position_quantity >= 0
+    assert result.final_state.cumulative_fees == pytest.approx(buy.fee + sell.fee)
+    assert result.unexecuted_final_target is not None
+    assert result.unexecuted_final_target.target == TargetWeight(0.0)
+
+
+def test_fractional_minimum_boundary_order_executes() -> None:
+    bars = [bar(0, open_price=100.0), bar(1, open_price=100.0)]
+    result = run_weights(
+        bars,
+        [TargetWeight(0.42), TargetWeight(0.4)],
+        initial_state=PortfolioState(cash=600.0, position_quantity=4.0),
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+        minimum_trade_notional=20.400000000000002,
+    )
+    assert len(result.fills) == 1
+    assert result.fills[0].quantity == 0.2
+
+
+def test_fractional_engine_delegates_positioning_execution_and_accounting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"positioning": 0, "execution": 0, "accounting": 0}
+    real_positioning = engine_module.market_order_for_target_weight_at_open
+    real_execution = engine_module.execute_market_order
+    real_accounting = engine_module.apply_fill
+
+    def positioning_spy(**kwargs: object) -> MarketOrder | None:
+        calls["positioning"] += 1
+        return real_positioning(**kwargs)  # type: ignore[arg-type]
+
+    def execution_spy(order: MarketOrder, **kwargs: object) -> Fill:
+        calls["execution"] += 1
+        return real_execution(order, **kwargs)  # type: ignore[arg-type]
+
+    def accounting_spy(state: PortfolioState, fill: Fill) -> PortfolioState:
+        calls["accounting"] += 1
+        return real_accounting(state, fill)
+
+    monkeypatch.setattr(
+        engine_module,
+        "market_order_for_target_weight_at_open",
+        positioning_spy,
+    )
+    monkeypatch.setattr(engine_module, "execute_market_order", execution_spy)
+    monkeypatch.setattr(engine_module, "apply_fill", accounting_spy)
+    run_weights(
+        [bar(0), bar(1)],
+        [TargetWeight(0.5), TargetWeight(0.0)],
+    )
+    assert calls == {"positioning": 1, "execution": 1, "accounting": 1}
+
+
+def test_fractional_engine_source_preserves_responsibility_boundaries() -> None:
+    source = inspect.getsource(engine_module.run_target_weight_backtest)
+    assert "market_order_for_target_weight_at_open(" in source
+    assert "execute_market_order(" in source
+    assert "apply_fill(" in source
+    for forbidden in (
+        "current_weight",
+        "desired_asset_value",
+        "delta_asset_value",
+        "raw_quantity",
+        "expected_trade_notional",
+        "abs(",
+        "model",
+        "prediction",
+        "strategy",
+        "summarize_backtest",
+        "build_trade_log",
+        "Any",
+        "deque",
+        "queue",
+    ):
+        assert forbidden not in source
