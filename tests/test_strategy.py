@@ -1,19 +1,17 @@
 import inspect
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 import backtest.strategy as strategy_module
-from backtest.engine import run_backtest
+from backtest.engine import run_backtest, run_target_weight_backtest
 from backtest.events import Bar
 from backtest.orders import Side
 from backtest.portfolio import PortfolioState
 from backtest.positioning import (
     TargetPosition,
     TargetWeight,
-    target_position_to_weight,
-    target_weight_to_position,
 )
 from backtest.reporting import build_trade_log, summarize_backtest
 from backtest.strategy import (
@@ -201,10 +199,10 @@ def test_exact_six_close_hand_check() -> None:
 
 def test_exact_six_close_weight_hand_check() -> None:
     weights = previous_close_momentum_target_weights(
-        bars_from_closes([100.0, 102.0, 101.0, 103.0, 103.0, 99.0])
+        bars_from_closes([100.0, 102.0, 102.0, 99.0, 101.0, 98.0])
     )
     assert weights == tuple(
-        TargetWeight(weight) for weight in (0.0, 1.0, 0.0, 1.0, 0.0, 0.0)
+        TargetWeight(weight) for weight in (0.0, 0.75, 0.50, 0.25, 0.75, 0.25)
     )
     assert isinstance(weights, tuple)
     assert all(type(weight) is TargetWeight for weight in weights)
@@ -214,9 +212,9 @@ def test_exact_six_close_weight_hand_check() -> None:
     ("closes", "expected_weights"),
     [
         ([100.0], (0.0,)),
-        ([100.0, 101.0], (0.0, 1.0)),
-        ([100.0, 100.0], (0.0, 0.0)),
-        ([100.0, 99.0], (0.0, 0.0)),
+        ([100.0, 101.0], (0.0, 0.75)),
+        ([100.0, 100.0], (0.0, 0.50)),
+        ([100.0, 99.0], (0.0, 0.25)),
     ],
 )
 def test_weight_strategy_endpoint_behavior(
@@ -232,19 +230,26 @@ def test_weight_strategy_endpoint_behavior(
     assert source_bars == original
 
 
-def test_weight_targets_exactly_map_existing_binary_targets() -> None:
+def test_fractional_weight_mapping_is_distinct_from_binary_mapping() -> None:
     source_bars = integration_bars()
     binary = previous_close_momentum_targets(source_bars)
     weights = previous_close_momentum_target_weights(source_bars)
-    assert weights == tuple(target_position_to_weight(target) for target in binary)
-    assert tuple(target_weight_to_position(target) for target in weights) == binary
+    assert binary == EXPECTED_TARGETS
+    assert tuple(target.weight for target in weights) == (
+        0.0,
+        0.75,
+        0.25,
+        0.75,
+        0.50,
+        0.25,
+    )
 
 
-def test_weight_strategy_has_no_fractional_rule() -> None:
+def test_weight_strategy_uses_only_fixed_fractional_rules() -> None:
     weights = previous_close_momentum_target_weights(
         bars_from_closes([100.0, 102.0, 101.0, 103.0])
     )
-    assert {target.weight for target in weights} <= {0.0, 1.0}
+    assert {target.weight for target in weights} <= {0.0, 0.25, 0.50, 0.75}
 
 
 def test_changing_future_bars_does_not_change_earlier_weight_targets() -> None:
@@ -255,25 +260,14 @@ def test_changing_future_bars_does_not_change_earlier_weight_targets() -> None:
     )
 
 
-def test_binary_pipeline_is_identical_after_endpoint_round_trip() -> None:
+def test_binary_pipeline_is_unchanged_by_fractional_strategy() -> None:
     source_bars = integration_bars()
     binary_targets = previous_close_momentum_targets(source_bars)
-    weight_targets = previous_close_momentum_target_weights(source_bars)
-    round_trip_targets = tuple(
-        target_weight_to_position(target) for target in weight_targets
-    )
-    original_pipeline = run_pipeline(source_bars)
-    round_trip_result = run_backtest(
-        bars=source_bars,
-        targets=round_trip_targets,
-        initial_state=PortfolioState(cash=10_000.0),
-        fee_rate=FEE_RATE,
-        slippage_rate=SLIPPAGE_RATE,
-    )
-    assert round_trip_targets == binary_targets
-    assert round_trip_result == original_pipeline[1]
-    assert build_trade_log(round_trip_result) == original_pipeline[2]
-    assert summarize_backtest(round_trip_result) == original_pipeline[3]
+    first = run_pipeline(source_bars)
+    previous_close_momentum_target_weights(source_bars)
+    second = run_pipeline(source_bars)
+    assert binary_targets == EXPECTED_TARGETS
+    assert first == second
 
 
 def test_outputs_are_target_position_members_not_raw_integers() -> None:
@@ -432,3 +426,306 @@ def test_repeated_full_pipeline_runs_are_deterministic() -> None:
     first = run_pipeline(source_bars)
     second = run_pipeline(source_bars)
     assert first == second
+
+
+@pytest.mark.parametrize("invalid", [None, 1, object(), {"bar": bar()}])
+def test_fractional_strategy_rejects_non_sequence_input(invalid: object) -> None:
+    with pytest.raises(StrategyError, match="non-string sequence"):
+        previous_close_momentum_target_weights(invalid)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("invalid", ["bars", b"bars", bytearray(b"bars")])
+def test_fractional_strategy_rejects_string_like_input(invalid: object) -> None:
+    with pytest.raises(StrategyError, match="non-string sequence"):
+        previous_close_momentum_target_weights(invalid)  # type: ignore[arg-type]
+
+
+def test_fractional_strategy_rejects_empty_and_non_bar_inputs() -> None:
+    with pytest.raises(StrategyError, match="at least one"):
+        previous_close_momentum_target_weights([])
+    with pytest.raises(StrategyError, match=r"bars\[0\] must be a Bar"):
+        previous_close_momentum_target_weights([object()])  # type: ignore[list-item]
+
+
+@pytest.mark.parametrize(
+    ("source_bars", "message"),
+    [
+        ([bar(timestamp=datetime(2024, 1, 1))], "timezone"),
+        ([bar(timestamp=START), bar(timestamp=START)], "duplicates"),
+        (
+            [bar(timestamp=START), bar(timestamp=START - timedelta(hours=1))],
+            "not strictly later",
+        ),
+        (
+            [bar(timestamp=START), bar(timestamp=START + timedelta(hours=2))],
+            "not exactly one hour",
+        ),
+    ],
+)
+def test_fractional_strategy_rejects_invalid_timestamps(
+    source_bars: list[Bar], message: str
+) -> None:
+    with pytest.raises(StrategyError, match=message):
+        previous_close_momentum_target_weights(source_bars)
+
+
+@pytest.mark.parametrize(
+    ("invalid", "message"),
+    [
+        (True, "not boolean"),
+        ("100", "numeric"),
+        (0.0, "strictly positive"),
+        (-1.0, "strictly positive"),
+        (float("nan"), "finite"),
+        (float("inf"), "finite"),
+        (float("-inf"), "finite"),
+    ],
+)
+def test_fractional_strategy_rejects_invalid_closes(
+    invalid: object, message: str
+) -> None:
+    invalid_bar = replace(bar(), close=invalid)  # type: ignore[arg-type]
+    with pytest.raises(StrategyError, match=message):
+        previous_close_momentum_target_weights([invalid_bar])
+
+
+def test_fractional_targets_are_immutable_and_inputs_unchanged() -> None:
+    source_bars = bars_from_closes([100.0, 102.0, 102.0, 99.0])
+    original = list(source_bars)
+    first = previous_close_momentum_target_weights(source_bars)
+    second = previous_close_momentum_target_weights(source_bars)
+    assert first == second
+    assert first is not second
+    assert source_bars == original
+    with pytest.raises(FrozenInstanceError):
+        first[1].weight = 0.25  # type: ignore[misc]
+
+
+def test_fractional_strategy_uses_only_closes() -> None:
+    source = bars_from_closes([100.0, 102.0, 102.0, 99.0])
+    expected = previous_close_momentum_target_weights(source)
+    changed = [
+        replace(
+            item,
+            open=item.open + 1000.0,
+            high=item.high + 2000.0,
+            low=item.low - 50.0,
+            volume=item.volume + 999.0,
+        )
+        for item in source
+    ]
+    assert previous_close_momentum_target_weights(changed) == expected
+
+
+def test_future_close_cannot_change_earlier_fractional_targets() -> None:
+    original = bars_from_closes([100.0, 102.0, 102.0, 99.0, 101.0])
+    changed = bars_from_closes([100.0, 102.0, 102.0, 1_000_000.0, 1.0])
+    assert previous_close_momentum_target_weights(original)[:3] == (
+        previous_close_momentum_target_weights(changed)[:3]
+    )
+
+
+def test_fractional_strategy_source_preserves_information_boundaries() -> None:
+    source = inspect.getsource(
+        strategy_module.previous_close_momentum_target_weights
+    )
+    assert "_validated_closes(" in source
+    for forbidden in (
+        ".open",
+        ".high",
+        ".low",
+        ".volume",
+        "bars[index + 1]",
+        "PortfolioState",
+        "fee_rate",
+        "slippage_rate",
+        "rebalance_tolerance",
+        "minimum_trade_notional",
+        "create_pending_target",
+        "MarketOrder",
+        "execute_market_order",
+        "apply_fill",
+        "run_target_weight_backtest",
+        "build_trade_log",
+        "summarize_backtest",
+        "model",
+        "prediction",
+        "threshold",
+    ):
+        assert forbidden not in source
+
+
+def test_fractional_strategy_zero_cost_end_to_end_smoke() -> None:
+    source_bars = [
+        bar(index, open_price=open_price, close_price=close_price)
+        for index, (open_price, close_price) in enumerate(
+            zip(
+                [100.0, 101.0, 103.0, 36.0, 104.0, 102.0],
+                [100.0, 102.0, 102.0, 99.0, 101.0, 98.0],
+                strict=True,
+            )
+        )
+    ]
+    targets = previous_close_momentum_target_weights(source_bars)
+    result = run_target_weight_backtest(
+        bars=source_bars,
+        targets=targets,
+        initial_state=PortfolioState(cash=1000.0),
+        fee_rate=0.0,
+        slippage_rate=0.0,
+        rebalance_tolerance=0.0,
+        minimum_trade_notional=0.0,
+    )
+    trade_log = build_trade_log(result)
+    summary = summarize_backtest(result)
+    assert tuple(target.weight for target in targets) == (
+        0.0,
+        0.75,
+        0.50,
+        0.25,
+        0.75,
+        0.25,
+    )
+    assert len(targets) == len(source_bars)
+    assert len(result.portfolio_history) == len(source_bars)
+    assert len(trade_log) == len(result.fills) == summary.trade_count == 4
+    assert [fill.executed_at for fill in result.fills] == [
+        source_bars[index].timestamp for index in (2, 3, 4, 5)
+    ]
+    assert [fill.order_created_at for fill in result.fills] == [
+        source_bars[index].timestamp for index in (1, 2, 3, 4)
+    ]
+    assert [fill.reference_price for fill in result.fills] == [
+        source_bars[index].open for index in (2, 3, 4, 5)
+    ]
+    assert result.unexecuted_final_target is not None
+    assert result.unexecuted_final_target.target == TargetWeight(0.25)
+    assert summary.final_portfolio_value == result.portfolio_history[-1].portfolio_value
+    exposures = [
+        item.position_quantity * item.close_price / item.portfolio_value
+        for item in result.portfolio_history
+    ]
+    assert summary.average_exposure == pytest.approx(sum(exposures) / len(exposures))
+
+    first_buy = result.fills[0]
+    expected_buy = 0.75 * 1000.0 / source_bars[2].open
+    assert first_buy.side is Side.BUY
+    assert first_buy.quantity == pytest.approx(expected_buy)
+    pre_sell_cash = 250.0
+    pre_sell_position = expected_buy
+    sell_open = source_bars[3].open
+    pre_sell_value = pre_sell_cash + pre_sell_position * sell_open
+    expected_sell = (
+        pre_sell_position * sell_open - 0.50 * pre_sell_value
+    ) / sell_open
+    second_fill = result.fills[1]
+    assert second_fill.side is Side.SELL
+    assert second_fill.quantity == pytest.approx(expected_sell)
+
+
+def test_fractional_strategy_cost_aware_end_to_end_smoke() -> None:
+    source_bars = [
+        bar(index, open_price=open_price, close_price=close_price)
+        for index, (open_price, close_price) in enumerate(
+            zip(
+                [100.0, 101.0, 103.0, 36.0, 104.0, 102.0],
+                [100.0, 102.0, 102.0, 99.0, 101.0, 98.0],
+                strict=True,
+            )
+        )
+    ]
+    targets = previous_close_momentum_target_weights(source_bars)
+    result = run_target_weight_backtest(
+        bars=source_bars,
+        targets=targets,
+        initial_state=PortfolioState(cash=1000.0),
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.05,
+        minimum_trade_notional=25.0,
+    )
+    trade_log = build_trade_log(result)
+    summary = summarize_backtest(result)
+    assert targets == previous_close_momentum_target_weights(source_bars)
+    assert len(trade_log) == len(result.fills) == summary.trade_count
+    assert all(fill.fee > 0 for fill in result.fills)
+    assert all(
+        fill.fill_price > fill.reference_price
+        if fill.side is Side.BUY
+        else fill.fill_price < fill.reference_price
+        for fill in result.fills
+    )
+    assert result.final_state.cash >= 0
+    assert result.final_state.position_quantity >= 0
+    assert summary.total_fees == pytest.approx(
+        sum(fill.fee for fill in result.fills)
+    )
+    realized_exposures = [
+        item.position_quantity * item.close_price / item.portfolio_value
+        for item in result.portfolio_history
+    ]
+    assert summary.average_exposure == pytest.approx(
+        sum(realized_exposures) / len(realized_exposures)
+    )
+
+
+def test_fractional_strategy_tolerance_can_suppress_a_rebalance() -> None:
+    source_bars = [
+        bar(index, open_price=open_price, close_price=close_price)
+        for index, (open_price, close_price) in enumerate(
+            zip(
+                [100.0, 101.0, 103.0, 36.0, 104.0, 102.0],
+                [100.0, 102.0, 102.0, 99.0, 101.0, 98.0],
+                strict=True,
+            )
+        )
+    ]
+    targets = previous_close_momentum_target_weights(source_bars)
+    exact_result = run_target_weight_backtest(
+        bars=source_bars,
+        targets=targets,
+        initial_state=PortfolioState(cash=1000.0),
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.0,
+        minimum_trade_notional=0.0,
+    )
+    tolerant_result = run_target_weight_backtest(
+        bars=source_bars,
+        targets=targets,
+        initial_state=PortfolioState(cash=1000.0),
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.05,
+        minimum_trade_notional=0.0,
+    )
+    rebalance_timestamp = source_bars[3].timestamp
+    assert any(fill.executed_at == rebalance_timestamp for fill in exact_result.fills)
+    assert all(
+        fill.executed_at != rebalance_timestamp for fill in tolerant_result.fills
+    )
+    assert targets == previous_close_momentum_target_weights(source_bars)
+    assert tolerant_result.final_state.cumulative_fees == pytest.approx(
+        sum(fill.fee for fill in tolerant_result.fills)
+    )
+
+
+def test_fractional_strategy_minimum_notional_can_suppress_without_fee() -> None:
+    source_bars = bars_from_closes([100.0, 102.0, 99.0])
+    targets = previous_close_momentum_target_weights(source_bars)
+    result = run_target_weight_backtest(
+        bars=source_bars,
+        targets=targets,
+        initial_state=PortfolioState(cash=20.0),
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.0,
+        minimum_trade_notional=25.0,
+    )
+    assert targets == (
+        TargetWeight(0.0),
+        TargetWeight(0.75),
+        TargetWeight(0.25),
+    )
+    assert result.fills == ()
+    assert result.final_state.cumulative_fees == 0.0

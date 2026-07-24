@@ -20,6 +20,9 @@
 - A continuous target created after bar `t` may execute only at bar `t+1` open; the final continuous target remains unexecuted without a later bar.
 - The continuous engine delegates sizing, rebalance tolerance, and minimum-notional filtering to positioning.
 - Do not silently forward-fill missing OHLC bars. Missing intervals must remain explicit or be handled by a documented, tested policy.
+- Deterministic strategies may produce target intents only from completed observable bars.
+- Strategy decisions remain separate from execution costs, portfolio state, and no-trade filters.
+- The deterministic fractional strategy is a workflow baseline, not a selected or optimized allocation policy.
 
 ## Costs, fills, and accounting
 
