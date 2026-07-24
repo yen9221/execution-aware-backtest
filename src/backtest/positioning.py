@@ -198,15 +198,17 @@ def market_order_for_target_weight_at_open(
     reference_open: float,
     fee_rate: float,
     slippage_rate: float,
+    rebalance_tolerance: float,
 ) -> MarketOrder | None:
     """Size a cost-aware delta order from an execution-open portfolio mark.
 
     The target is applied to pre-trade portfolio value at ``reference_open``.
     This function creates no fill and does not mutate or update the portfolio.
     Adverse slippage and proportional fees limit buy affordability but do not
-    redefine the reference-open target exposure. Tolerances and minimum
-    notionals are intentionally absent. A zero-value portfolio returns no order
-    because it has no capital to allocate.
+    redefine the reference-open target exposure. An absolute current-to-target
+    weight deviation less than or equal to ``rebalance_tolerance`` produces no
+    order. Minimum notionals are intentionally absent. A zero-value portfolio
+    returns no order because it has no capital to allocate.
     """
 
     if not isinstance(state, PortfolioState):
@@ -253,6 +255,14 @@ def market_order_for_target_weight_at_open(
             "slippage_rate must satisfy 0 <= slippage_rate < 1, "
             f"got {slippage_rate_value!r}"
         )
+    rebalance_tolerance_value = _finite_number(
+        "rebalance_tolerance", rebalance_tolerance
+    )
+    if not 0 <= rebalance_tolerance_value <= 1:
+        raise PositioningError(
+            "rebalance_tolerance must satisfy 0 <= rebalance_tolerance <= 1, "
+            f"got {rebalance_tolerance_value!r}"
+        )
 
     current_asset_value = _finite_calculation(
         "current_asset_value", position * reference
@@ -266,6 +276,15 @@ def market_order_for_target_weight_at_open(
             f"got {pre_trade_portfolio_value!r}"
         )
     if pre_trade_portfolio_value == 0:
+        return None
+
+    current_weight = _finite_calculation(
+        "current_weight", current_asset_value / pre_trade_portfolio_value
+    )
+    absolute_weight_deviation = _finite_calculation(
+        "absolute_weight_deviation", abs(current_weight - target.weight)
+    )
+    if absolute_weight_deviation <= rebalance_tolerance_value:
         return None
 
     desired_asset_value = _finite_calculation(

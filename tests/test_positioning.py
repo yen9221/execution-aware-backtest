@@ -679,6 +679,7 @@ def convert_weight(
     reference_open: float = REFERENCE_OPEN,
     fee_rate: float = 0.0,
     slippage_rate: float = 0.0,
+    rebalance_tolerance: float = 0.0,
 ) -> MarketOrder | None:
     return market_order_for_target_weight_at_open(
         state=state,
@@ -687,6 +688,7 @@ def convert_weight(
         reference_open=reference_open,
         fee_rate=fee_rate,
         slippage_rate=slippage_rate,
+        rebalance_tolerance=rebalance_tolerance,
     )
 
 
@@ -778,6 +780,7 @@ def test_weight_converter_rejects_invalid_state_and_pending_types() -> None:
             reference_open=REFERENCE_OPEN,
             fee_rate=0.0,
             slippage_rate=0.0,
+            rebalance_tolerance=0.0,
         )
     with pytest.raises(PositioningError, match="PendingTargetWeight"):
         market_order_for_target_weight_at_open(
@@ -787,6 +790,7 @@ def test_weight_converter_rejects_invalid_state_and_pending_types() -> None:
             reference_open=REFERENCE_OPEN,
             fee_rate=0.0,
             slippage_rate=0.0,
+            rebalance_tolerance=0.0,
         )
 
 
@@ -1217,3 +1221,198 @@ def test_continuous_positioning_source_preserves_responsibility_boundaries() -> 
         "build_trade_log",
     ):
         assert forbidden not in source
+
+
+def test_rebalance_tolerance_is_required_and_keyword_only() -> None:
+    kwargs = {
+        "state": PortfolioState(cash=1000.0),
+        "pending_target": pending_weight(0.5),
+        "execution_bar_timestamp": EXECUTION_AT,
+        "reference_open": REFERENCE_OPEN,
+        "fee_rate": 0.0,
+        "slippage_rate": 0.0,
+    }
+    with pytest.raises(TypeError, match="rebalance_tolerance"):
+        market_order_for_target_weight_at_open(**kwargs)  # type: ignore[arg-type]
+    parameter = inspect.signature(
+        market_order_for_target_weight_at_open
+    ).parameters["rebalance_tolerance"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize("rebalance_tolerance", [0.0, 0.01, 0.5, 1.0])
+def test_valid_rebalance_tolerances_are_accepted(
+    rebalance_tolerance: float,
+) -> None:
+    result = convert_weight(
+        PortfolioState(cash=600.0, position_quantity=4.0),
+        0.4,
+        rebalance_tolerance=rebalance_tolerance,
+    )
+    assert result is None
+
+
+@pytest.mark.parametrize(
+    "rebalance_tolerance",
+    [
+        -0.01,
+        1.01,
+        True,
+        False,
+        "0.01",
+        None,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+    ],
+)
+def test_invalid_rebalance_tolerances_are_rejected(
+    rebalance_tolerance: object,
+) -> None:
+    with pytest.raises(PositioningError, match="rebalance_tolerance"):
+        convert_weight(
+            PortfolioState(cash=1000.0),
+            rebalance_tolerance=rebalance_tolerance,  # type: ignore[arg-type]
+        )
+
+
+def test_inside_rebalance_band_returns_none() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    assert convert_weight(state, 0.405, rebalance_tolerance=0.01) is None
+
+
+def test_exact_rebalance_boundary_is_inclusive_without_hidden_epsilon() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    target = 0.65
+    exact_deviation = abs(0.4 - target)
+    assert exact_deviation == 0.25
+    assert convert_weight(state, target, rebalance_tolerance=exact_deviation) is None
+    below_boundary = math.nextafter(exact_deviation, 0.0)
+    order = convert_weight(state, target, rebalance_tolerance=below_boundary)
+    assert order is not None
+    assert order.side is Side.BUY
+
+
+@pytest.mark.parametrize(
+    ("target", "side", "quantity"),
+    [(0.42, Side.BUY, 0.2), (0.38, Side.SELL, 0.2)],
+)
+def test_outside_rebalance_band_sizes_to_exact_target(
+    target: float, side: Side, quantity: float
+) -> None:
+    order = convert_weight(
+        PortfolioState(cash=600.0, position_quantity=4.0),
+        target,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+    )
+    assert order is not None
+    assert order.side is side
+    assert order.quantity == pytest.approx(quantity)
+
+
+@pytest.mark.parametrize(
+    ("state", "target"),
+    [
+        (PortfolioState(cash=1000.0), 1.0),
+        (PortfolioState(cash=0.0, position_quantity=10.0), 0.0),
+        (PortfolioState(cash=600.0, position_quantity=4.0), 0.75),
+    ],
+)
+def test_tolerance_one_suppresses_every_valid_rebalance(
+    state: PortfolioState, target: float
+) -> None:
+    assert convert_weight(state, target, rebalance_tolerance=1.0) is None
+
+
+def test_zero_value_portfolio_remains_no_trade_with_tolerance() -> None:
+    assert (
+        convert_weight(
+            PortfolioState(cash=0.0), 1.0, rebalance_tolerance=0.01
+        )
+        is None
+    )
+
+
+def test_tolerance_uses_pre_trade_reference_open_weight_before_sizing() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    # The pre-trade reference-open weight is 0.4. A slipped fill price is not
+    # part of this trigger, and the huge finite fee would overflow if BUY
+    # sizing were incorrectly attempted before the tolerance check.
+    assert (
+        convert_weight(
+            state,
+            0.405,
+            fee_rate=1e308,
+            slippage_rate=0.9,
+            rebalance_tolerance=0.01,
+        )
+        is None
+    )
+
+
+def test_tiny_deviation_depends_only_on_explicit_tolerance() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    current_weight = 0.4
+    tiny_target = math.nextafter(current_weight, 1.0)
+    deviation = tiny_target - current_weight
+    zero_tolerance_order = convert_weight(
+        state, tiny_target, rebalance_tolerance=0.0
+    )
+    positive_tolerance_order = convert_weight(
+        state, tiny_target, rebalance_tolerance=deviation
+    )
+    assert zero_tolerance_order is not None
+    assert zero_tolerance_order.side is Side.BUY
+    assert zero_tolerance_order.quantity > 0
+    assert positive_tolerance_order is None
+
+
+@pytest.mark.parametrize("target", [0.42, 0.38])
+def test_outside_band_orders_execute_and_apply_with_costs(target: float) -> None:
+    initial = PortfolioState(cash=600.0, position_quantity=4.0)
+    order = convert_weight(
+        initial,
+        target,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+    )
+    assert order is not None
+    fill = execute_market_order(
+        order,
+        executed_at=EXECUTION_AT,
+        reference_price=REFERENCE_OPEN,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+    )
+    final = apply_fill(initial, fill)
+    assert final.cash >= 0
+    assert final.position_quantity >= 0
+    assert final.cumulative_fees == pytest.approx(fill.fee)
+    assert initial == PortfolioState(cash=600.0, position_quantity=4.0)
+
+
+def test_inside_band_integration_has_no_fill_fee_or_state_change() -> None:
+    initial = PortfolioState(cash=600.0, position_quantity=4.0)
+    order = convert_weight(
+        initial,
+        0.405,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+    )
+    fill = None if order is None else execute_market_order(
+        order,
+        executed_at=EXECUTION_AT,
+        reference_price=REFERENCE_OPEN,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+    )
+    final = initial if fill is None else apply_fill(initial, fill)
+    assert order is None
+    assert fill is None
+    assert final is initial
+    assert final.cumulative_fees == 0.0

@@ -24,6 +24,9 @@
 - Continuous target-weight rebalance sizing uses pre-trade portfolio value marked at the observable execution-bar open.
 - BUY affordability must account for adverse slippage and proportional fees using formulas consistent with execution.
 - Transaction costs may cause realized post-trade weight to differ from the intended target.
+- Continuous-weight rebalance tolerance is an absolute weight deviation; a deviation less than or equal to tolerance produces no trade.
+- When a continuous rebalance is triggered, sizing remains toward the exact target rather than the tolerance boundary.
+- Rebalance tolerance is distinct from minimum trade notional.
 - Positioning returns a delta order only; execution and portfolio accounting remain separate.
 - Keep fees and slippage separately traceable in records and results.
 - Buy-side slippage increases the fill price; sell-side slippage decreases it.
