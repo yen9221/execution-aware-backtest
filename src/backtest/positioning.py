@@ -56,6 +56,14 @@ class PendingTarget:
     target: TargetPosition
 
 
+@dataclass(frozen=True, slots=True)
+class PendingTargetWeight:
+    """A price-free continuous target selected from one completed bar."""
+
+    decision_bar_timestamp: datetime
+    target: TargetWeight
+
+
 def _utc_timestamp(field: str, value: object) -> datetime:
     if not isinstance(value, datetime):
         raise PositioningError(f"{field} must be a datetime, got {value!r}")
@@ -113,6 +121,20 @@ def _validated_target(field: str, value: object) -> TargetPosition:
     return value
 
 
+def _validated_target_weight(field: str, value: object) -> TargetWeight:
+    if not isinstance(value, TargetWeight):
+        raise PositioningError(f"{field} must be a TargetWeight, got {value!r}")
+    # Revalidate the contained value in case an instance was constructed by
+    # bypassing the frozen dataclass constructor.
+    return TargetWeight(value.weight)
+
+
+def _finite_calculation(field: str, value: float) -> float:
+    if not math.isfinite(value):
+        raise PositioningError(f"calculated {field} must be finite, got {value!r}")
+    return value
+
+
 def target_position_to_weight(target: TargetPosition) -> TargetWeight:
     """Convert one supported binary position to its canonical endpoint weight."""
 
@@ -121,10 +143,12 @@ def target_position_to_weight(target: TargetPosition) -> TargetWeight:
 
 
 def target_weight_to_position(target: TargetWeight) -> TargetPosition:
-    """Convert an exact endpoint weight for the current binary execution path.
+    """Convert an exact endpoint weight for the binary execution path.
 
-    Fractional weights are valid target representations, but partial rebalance
-    execution is not implemented and therefore cannot be silently coerced.
+    Fractional weights are valid target representations and can be sized
+    through ``market_order_for_target_weight_at_open``. They cannot be
+    converted to the binary ``TargetPosition`` path without information loss,
+    and therefore are rejected rather than silently coerced.
     """
 
     if not isinstance(target, TargetWeight):
@@ -149,6 +173,139 @@ def create_pending_target(
     timestamp = _utc_timestamp("decision_bar_timestamp", decision_bar_timestamp)
     target_value = _validated_target("target", target)
     return PendingTarget(decision_bar_timestamp=timestamp, target=target_value)
+
+
+def create_pending_target_weight(
+    *,
+    decision_bar_timestamp: datetime,
+    target: TargetWeight,
+) -> PendingTargetWeight:
+    """Create a UTC-normalized, price-free continuous target intent."""
+
+    timestamp = _utc_timestamp("decision_bar_timestamp", decision_bar_timestamp)
+    target_value = _validated_target_weight("target", target)
+    return PendingTargetWeight(
+        decision_bar_timestamp=timestamp,
+        target=target_value,
+    )
+
+
+def market_order_for_target_weight_at_open(
+    *,
+    state: PortfolioState,
+    pending_target: PendingTargetWeight,
+    execution_bar_timestamp: datetime,
+    reference_open: float,
+) -> MarketOrder | None:
+    """Size a zero-cost delta order from an execution-open portfolio mark.
+
+    The target is applied to pre-trade portfolio value at ``reference_open``.
+    This function creates no fill and does not mutate or update the portfolio.
+    Fees, slippage, tolerances, and minimum notionals are intentionally absent.
+    A zero-value portfolio returns no order because it has no capital to
+    allocate. A buy is capped at zero-cost affordability; only when multiplying
+    that capped quantity back by the open would overspend is it moved one float
+    step toward zero.
+    """
+
+    if not isinstance(state, PortfolioState):
+        raise PositioningError(f"state must be a PortfolioState, got {state!r}")
+    if not isinstance(pending_target, PendingTargetWeight):
+        raise PositioningError(
+            "pending_target must be a PendingTargetWeight, "
+            f"got {pending_target!r}"
+        )
+
+    cash = _nonnegative_number("state.cash", state.cash)
+    position = _nonnegative_number(
+        "state.position_quantity", state.position_quantity
+    )
+    _nonnegative_number("state.cumulative_fees", state.cumulative_fees)
+
+    decision_timestamp = _utc_timestamp(
+        "pending_target.decision_bar_timestamp",
+        pending_target.decision_bar_timestamp,
+    )
+    target = _validated_target_weight("pending_target.target", pending_target.target)
+    execution_timestamp = _utc_timestamp(
+        "execution_bar_timestamp", execution_bar_timestamp
+    )
+    if execution_timestamp <= decision_timestamp:
+        relation = "equal to" if execution_timestamp == decision_timestamp else "before"
+        raise PositioningError(
+            "execution_bar_timestamp must be strictly later than "
+            "pending_target.decision_bar_timestamp; execution instant "
+            f"{execution_timestamp.isoformat()} is {relation} decision-bar instant "
+            f"{decision_timestamp.isoformat()}"
+        )
+
+    reference = _finite_number("reference_open", reference_open)
+    if reference <= 0:
+        raise PositioningError(
+            f"reference_open must be strictly positive, got {reference!r}"
+        )
+
+    current_asset_value = _finite_calculation(
+        "current_asset_value", position * reference
+    )
+    pre_trade_portfolio_value = _finite_calculation(
+        "pre_trade_portfolio_value", cash + current_asset_value
+    )
+    if pre_trade_portfolio_value < 0:
+        raise PositioningError(
+            "calculated pre_trade_portfolio_value must be non-negative, "
+            f"got {pre_trade_portfolio_value!r}"
+        )
+    if pre_trade_portfolio_value == 0:
+        return None
+
+    desired_asset_value = _finite_calculation(
+        "desired_asset_value", target.weight * pre_trade_portfolio_value
+    )
+    delta_asset_value = _finite_calculation(
+        "delta_asset_value", desired_asset_value - current_asset_value
+    )
+    if delta_asset_value == 0:
+        return None
+
+    if delta_asset_value > 0:
+        raw_quantity = _finite_calculation(
+            "raw buy quantity", delta_asset_value / reference
+        )
+        maximum_quantity = _finite_calculation(
+            "maximum affordable quantity", cash / reference
+        )
+        quantity = min(raw_quantity, maximum_quantity)
+        if quantity * reference > cash:
+            quantity = math.nextafter(quantity, 0.0)
+        side = Side.BUY
+    else:
+        raw_quantity = _finite_calculation(
+            "raw sell quantity", -delta_asset_value / reference
+        )
+        quantity = min(raw_quantity, position)
+        side = Side.SELL
+
+    if not math.isfinite(quantity) or quantity <= 0:
+        raise PositioningError(
+            "calculated order quantity must be finite and strictly positive, "
+            f"got {quantity!r}"
+        )
+    if side is Side.BUY and quantity * reference > cash:
+        raise PositioningError(
+            "calculated buy quantity exceeds zero-cost affordability after "
+            "the conservative float adjustment"
+        )
+    if side is Side.SELL and quantity > position:
+        raise PositioningError(
+            "calculated sell quantity exceeds the existing position"
+        )
+
+    return MarketOrder(
+        created_at=decision_timestamp,
+        side=side,
+        quantity=quantity,
+    )
 
 
 def market_order_for_target_at_open(

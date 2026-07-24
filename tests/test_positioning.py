@@ -1,9 +1,11 @@
+import inspect
 import math
 from dataclasses import FrozenInstanceError, fields, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 
 import pytest
 
+import backtest.positioning as positioning_module
 from backtest.execution import Fill, execute_market_order
 from backtest.orders import MarketOrder, Side
 from backtest.portfolio import PortfolioState, apply_fill
@@ -11,11 +13,14 @@ from backtest.positioning import (
     CASH_TARGET,
     LONG_TARGET,
     PendingTarget,
+    PendingTargetWeight,
     PositioningError,
     TargetPosition,
     TargetWeight,
     create_pending_target,
+    create_pending_target_weight,
     market_order_for_target_at_open,
+    market_order_for_target_weight_at_open,
     target_position_to_weight,
     target_weight_to_position,
 )
@@ -656,3 +661,344 @@ def test_invalid_decision_timestamp_offset_is_rejected() -> None:
             decision_bar_timestamp=invalid,
             target=TargetPosition.CASH,
         )
+
+
+def pending_weight(weight: float = 0.5) -> PendingTargetWeight:
+    return create_pending_target_weight(
+        decision_bar_timestamp=DECISION_AT,
+        target=TargetWeight(weight),
+    )
+
+
+def convert_weight(
+    state: PortfolioState,
+    weight: float = 0.5,
+    *,
+    pending_target: PendingTargetWeight | None = None,
+    execution_bar_timestamp: datetime = EXECUTION_AT,
+    reference_open: float = REFERENCE_OPEN,
+) -> MarketOrder | None:
+    return market_order_for_target_weight_at_open(
+        state=state,
+        pending_target=pending_target or pending_weight(weight),
+        execution_bar_timestamp=execution_bar_timestamp,
+        reference_open=reference_open,
+    )
+
+
+def apply_zero_cost_weight_order(
+    state: PortfolioState,
+    weight: float,
+    *,
+    reference_open: float = REFERENCE_OPEN,
+) -> tuple[MarketOrder | None, PortfolioState]:
+    order = convert_weight(state, weight, reference_open=reference_open)
+    if order is None:
+        return None, state
+    fill = execute_market_order(
+        order,
+        executed_at=EXECUTION_AT,
+        reference_price=reference_open,
+        fee_rate=0.0,
+        slippage_rate=0.0,
+    )
+    return order, apply_fill(state, fill)
+
+
+def test_valid_pending_target_weight_creation_and_utc_normalization() -> None:
+    local_timestamp = datetime(
+        2024, 1, 1, 1, tzinfo=timezone(timedelta(hours=1))
+    )
+    result = create_pending_target_weight(
+        decision_bar_timestamp=local_timestamp,
+        target=TargetWeight(0.7),
+    )
+
+    assert result == PendingTargetWeight(DECISION_AT, TargetWeight(0.7))
+    assert result.decision_bar_timestamp.tzinfo is timezone.utc
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "message"),
+    [
+        (datetime(2024, 1, 1), "timezone"),
+        ("2024-01-01T00:00:00Z", "must be a datetime"),
+    ],
+)
+def test_invalid_pending_weight_decision_timestamp_is_rejected(
+    timestamp: object, message: str
+) -> None:
+    with pytest.raises(PositioningError, match=message):
+        create_pending_target_weight(
+            decision_bar_timestamp=timestamp,  # type: ignore[arg-type]
+            target=TargetWeight(0.5),
+        )
+
+
+@pytest.mark.parametrize("target", [0.5, TargetPosition.LONG, None, True])
+def test_invalid_raw_pending_weight_target_is_rejected(target: object) -> None:
+    with pytest.raises(PositioningError, match="TargetWeight"):
+        create_pending_target_weight(
+            decision_bar_timestamp=DECISION_AT,
+            target=target,  # type: ignore[arg-type]
+        )
+
+
+def test_pending_target_weight_is_immutable_and_has_minimal_schema() -> None:
+    intent = pending_weight(0.5)
+    assert [field.name for field in fields(PendingTargetWeight)] == [
+        "decision_bar_timestamp",
+        "target",
+    ]
+    assert {field.name for field in fields(PendingTargetWeight)}.isdisjoint(
+        {
+            "price",
+            "reference_open",
+            "quantity",
+            "model",
+            "prediction",
+            "probability",
+            "threshold",
+        }
+    )
+    with pytest.raises(FrozenInstanceError):
+        intent.target = TargetWeight(0.75)  # type: ignore[misc]
+
+
+def test_weight_converter_rejects_invalid_state_and_pending_types() -> None:
+    with pytest.raises(PositioningError, match="state must be a PortfolioState"):
+        market_order_for_target_weight_at_open(
+            state={"cash": 1000.0},  # type: ignore[arg-type]
+            pending_target=pending_weight(),
+            execution_bar_timestamp=EXECUTION_AT,
+            reference_open=REFERENCE_OPEN,
+        )
+    with pytest.raises(PositioningError, match="PendingTargetWeight"):
+        market_order_for_target_weight_at_open(
+            state=PortfolioState(cash=1000.0),
+            pending_target=pending(),  # type: ignore[arg-type]
+            execution_bar_timestamp=EXECUTION_AT,
+            reference_open=REFERENCE_OPEN,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("cash", -1.0, "non-negative"),
+        ("position_quantity", -1.0, "non-negative"),
+        ("cumulative_fees", -1.0, "non-negative"),
+        ("cash", float("nan"), "finite"),
+        ("position_quantity", float("inf"), "finite"),
+        ("cumulative_fees", float("-inf"), "finite"),
+        ("cash", True, "not boolean"),
+        ("position_quantity", False, "not boolean"),
+        ("cumulative_fees", True, "not boolean"),
+    ],
+)
+def test_weight_converter_rejects_invalid_state_fields(
+    field: str, value: object, message: str
+) -> None:
+    state = replace(PortfolioState(cash=1000.0), **{field: value})
+    with pytest.raises(PositioningError, match=message):
+        convert_weight(state)
+
+
+def test_weight_converter_rejects_invalid_target_inside_pending_object() -> None:
+    invalid = replace(pending_weight(), target=0.5)  # type: ignore[arg-type]
+    with pytest.raises(PositioningError, match="pending_target.target.*TargetWeight"):
+        convert_weight(PortfolioState(cash=1000.0), pending_target=invalid)
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "message"),
+    [
+        (datetime(2024, 1, 1, 1), "timezone"),
+        ("2024-01-01T01:00:00Z", "must be a datetime"),
+        (DECISION_AT, "equal"),
+        (DECISION_AT - timedelta(seconds=1), "before"),
+    ],
+)
+def test_weight_converter_rejects_invalid_execution_timestamp(
+    timestamp: object, message: str
+) -> None:
+    with pytest.raises(PositioningError, match=message):
+        convert_weight(
+            PortfolioState(cash=1000.0),
+            execution_bar_timestamp=timestamp,  # type: ignore[arg-type]
+        )
+
+
+def test_weight_timestamps_compare_equivalent_utc_instants() -> None:
+    same_instant = datetime(
+        2023, 12, 31, 19, tzinfo=timezone(timedelta(hours=-5))
+    )
+    with pytest.raises(PositioningError, match="equal"):
+        convert_weight(
+            PortfolioState(cash=1000.0),
+            execution_bar_timestamp=same_instant,
+        )
+
+
+@pytest.mark.parametrize(
+    "reference_open",
+    [0.0, -1.0, float("nan"), float("inf"), float("-inf"), True, "100"],
+)
+def test_weight_converter_rejects_invalid_reference_open(
+    reference_open: object,
+) -> None:
+    with pytest.raises(PositioningError, match="reference_open"):
+        convert_weight(
+            PortfolioState(cash=1000.0),
+            reference_open=reference_open,  # type: ignore[arg-type]
+        )
+
+
+def test_weight_converter_rejects_non_finite_intermediate_arithmetic() -> None:
+    with pytest.raises(PositioningError, match="current_asset_value.*finite"):
+        convert_weight(
+            PortfolioState(cash=0.0, position_quantity=1e308),
+            reference_open=1e308,
+        )
+    with pytest.raises(PositioningError, match="pre_trade_portfolio_value.*finite"):
+        convert_weight(
+            PortfolioState(cash=1e308, position_quantity=1e308),
+            reference_open=1.0,
+        )
+
+
+def test_weight_converter_rejects_underflowed_resulting_quantity() -> None:
+    with pytest.raises(PositioningError, match="quantity.*strictly positive"):
+        convert_weight(
+            PortfolioState(cash=5e-324),
+            1.0,
+            reference_open=1e308,
+        )
+
+
+@pytest.mark.parametrize(
+    ("weight", "side", "quantity"),
+    [
+        (0.70, Side.BUY, 3.0),
+        (0.25, Side.SELL, 1.5),
+        (1.00, Side.BUY, 6.0),
+        (0.00, Side.SELL, 4.0),
+    ],
+)
+def test_central_weight_sizing_is_hand_checkable(
+    weight: float, side: Side, quantity: float
+) -> None:
+    order = convert_weight(
+        PortfolioState(cash=600.0, position_quantity=4.0), weight
+    )
+    assert order == MarketOrder(DECISION_AT, side, quantity)
+
+
+def test_central_current_weight_returns_none_exactly() -> None:
+    assert (
+        convert_weight(PortfolioState(cash=600.0, position_quantity=4.0), 0.4)
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "weight", "expected_side"),
+    [
+        (PortfolioState(cash=1000.0), 0.25, Side.BUY),
+        (PortfolioState(cash=1000.0), 0.50, Side.BUY),
+        (PortfolioState(cash=1000.0), 1.00, Side.BUY),
+        (PortfolioState(cash=0.0, position_quantity=10.0), 0.75, Side.SELL),
+        (PortfolioState(cash=0.0, position_quantity=10.0), 0.50, Side.SELL),
+        (PortfolioState(cash=0.0, position_quantity=10.0), 0.00, Side.SELL),
+        (PortfolioState(cash=600.0, position_quantity=4.0), 0.70, Side.BUY),
+        (PortfolioState(cash=600.0, position_quantity=4.0), 0.25, Side.SELL),
+    ],
+)
+def test_representative_weight_orders_reach_target_under_zero_costs(
+    state: PortfolioState, weight: float, expected_side: Side
+) -> None:
+    initial_value = state.cash + state.position_quantity * REFERENCE_OPEN
+    order, final = apply_zero_cost_weight_order(state, weight)
+    assert order is not None
+    assert order.side is expected_side
+    assert final.cash >= 0
+    assert final.position_quantity >= 0
+    assert final.cumulative_fees == state.cumulative_fees
+    final_value = final.cash + final.position_quantity * REFERENCE_OPEN
+    assert final_value == pytest.approx(initial_value)
+    assert final.position_quantity * REFERENCE_OPEN / final_value == pytest.approx(
+        weight
+    )
+
+
+@pytest.mark.parametrize("weight", [0.0, 0.25, 0.5, 1.0])
+def test_zero_value_portfolio_returns_none_for_every_target(weight: float) -> None:
+    assert convert_weight(PortfolioState(cash=0.0), weight) is None
+
+
+def test_zero_cash_full_long_same_and_full_targets_return_none() -> None:
+    state = PortfolioState(cash=0.0, position_quantity=10.0)
+    assert convert_weight(state, 1.0) is None
+
+
+def test_tiny_nonzero_weight_delta_is_not_suppressed_by_tolerance() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    order = convert_weight(state, math.nextafter(0.4, 1.0))
+    assert order is not None
+    assert order.side is Side.BUY
+    assert order.quantity > 0
+
+
+def test_weight_buy_affordability_uses_conditional_float_step() -> None:
+    state = PortfolioState(cash=0.1)
+    order = convert_weight(state, 1.0, reference_open=11.0)
+    assert order is not None
+    assert order.quantity == math.nextafter(state.cash / 11.0, 0.0)
+    assert order.quantity * 11.0 <= state.cash
+
+
+def test_weight_buy_and_sell_caps_are_respected() -> None:
+    buy_state = PortfolioState(cash=600.0, position_quantity=4.0)
+    buy = convert_weight(buy_state, 1.0)
+    sell = convert_weight(buy_state, 0.0)
+    assert buy is not None and buy.quantity <= buy_state.cash / REFERENCE_OPEN
+    assert sell is not None and sell.quantity <= buy_state.position_quantity
+
+
+def test_weight_order_preserves_timestamp_is_deterministic_and_inputs_unchanged() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0, cumulative_fees=2.0)
+    intent = pending_weight(0.7)
+    state_copy = replace(state)
+    intent_copy = replace(intent)
+    first = convert_weight(state, pending_target=intent)
+    second = convert_weight(state, pending_target=intent)
+    assert first == second
+    assert first is not second
+    assert first is not None and first.created_at == intent.decision_bar_timestamp
+    assert state == state_copy
+    assert intent == intent_copy
+
+
+def test_weight_positioning_returns_only_order_and_does_not_execute_or_apply() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    result = convert_weight(state, 0.7)
+    assert type(result) is MarketOrder
+    assert not isinstance(result, Fill)
+    assert state == PortfolioState(cash=600.0, position_quantity=4.0)
+    source = inspect.getsource(
+        positioning_module.market_order_for_target_weight_at_open
+    )
+    assert "execute_market_order" not in source
+    assert "apply_fill" not in source
+
+
+@pytest.mark.parametrize("weight", [0.0, 0.25, 0.40, 0.70, 1.0])
+def test_central_post_trade_accounting_at_zero_costs(weight: float) -> None:
+    initial = PortfolioState(cash=600.0, position_quantity=4.0, cumulative_fees=2.0)
+    _, final = apply_zero_cost_weight_order(initial, weight)
+    value = final.cash + final.position_quantity * REFERENCE_OPEN
+    assert final.cash >= 0
+    assert final.position_quantity >= 0
+    assert final.cumulative_fees == 2.0
+    assert value == pytest.approx(1000.0)
+    assert final.position_quantity * REFERENCE_OPEN / value == pytest.approx(weight)
