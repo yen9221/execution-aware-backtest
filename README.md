@@ -1,6 +1,6 @@
 # Execution-Aware Backtest
 
-Execution-Aware Backtest is a portfolio-level execution simulation prototype. The project currently provides strict synthetic OHLCV loading, price-free CASH/LONG target intents, a minimal deterministic next-bar execution loop, quantity-based fills, immutable single-asset long/cash accounting, and a separate deterministic reporting layer. It is not a production backtester.
+Execution-Aware Backtest is a portfolio-level execution simulation prototype. The project currently provides strict synthetic OHLCV loading, a deterministic baseline target rule, price-free CASH/LONG target intents, a minimal deterministic next-bar execution loop, quantity-based fills, immutable single-asset long/cash accounting, and a separate deterministic reporting layer. It is not a production backtester.
 
 The planned timing convention is to generate signals at a bar close and permit execution only at the next bar open. Same-bar close execution and execution of final-bar signals are non-goals.
 
@@ -39,6 +39,12 @@ Quantity-based market orders are represented by immutable records. `backtest.exe
 
 `backtest.positioning.PendingTarget` represents an already-determined CASH or LONG target independently from any model output. It is created after a completed decision bar and stores only that bar's timestamp and the target; it contains no future price or quantity. `market_order_for_target_at_open` converts the intent into a quantity-based market order, or `None`, only when the next execution-bar open is observable. All-in buy affordability includes adverse directional slippage and the proportional fee, with a one-float-step conservative sizing buffer. Repeated CASH or LONG targets produce no trade, and an existing long position is not rebalanced. The positioning layer itself contains no model, threshold, strategy, fill execution, or portfolio mutation.
 
+## Deterministic baseline strategy
+
+`backtest.strategy.previous_close_momentum_targets` is a minimal one-bar close-momentum baseline used to validate the strategy-to-execution boundary. Its first completed bar maps to CASH. Each later completed bar maps to LONG only when its close is higher than the preceding close; a flat or falling close maps to CASH. Targets are created only after their bars complete and can execute only at the next bar open through the existing engine. Allocation remains binary fully invested long or cash.
+
+This fixed rule has no threshold selection or parameter optimization. It is a workflow baseline, not evidence of alpha, benchmark superiority, or robust profitability.
+
 ## Minimal engine
 
 `backtest.engine.run_backtest` consumes one precomputed CASH or LONG target for each completed chronological bar. A target created from bar `t` can execute only at bar `t+1` open; the final bar's target is retained as unexecuted because no later open exists. The engine delegates target conversion, fill calculation, and portfolio accounting to their existing modules, records real fills only, and stores one immutable end-of-bar portfolio snapshot per bar. Portfolio value is marked as cash plus long quantity times that bar's close and is only a state observation, not a performance conclusion. The loop does not perform prediction, threshold selection, strategy generation, performance analysis, or output generation.
@@ -55,4 +61,4 @@ Initial portfolio value marks initial cash and quantity using the first snapshot
 
 ## Not implemented
 
-Models, prediction-to-target policy, thresholds, strategies, signals, pending-order queues, benchmark comparison, risk-adjusted or annualized performance metrics, configuration loading, CSV output, a command-line interface, notebooks, market-data ingestion, and production backtest behavior are not implemented. Production readiness and profitability assessment are outside the current scope.
+Models, learned prediction-to-target policy, configurable thresholds, strategy frameworks, signals, pending-order queues, benchmark comparison, risk-adjusted or annualized performance metrics, configuration loading, CSV output, a command-line interface, notebooks, market-data ingestion, and production backtest behavior are not implemented. Production readiness and profitability assessment are outside the current scope.
