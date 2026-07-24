@@ -27,6 +27,9 @@
 - Continuous-weight rebalance tolerance is an absolute weight deviation; a deviation less than or equal to tolerance produces no trade.
 - When a continuous rebalance is triggered, sizing remains toward the exact target rather than the tolerance boundary.
 - Rebalance tolerance is distinct from minimum trade notional.
+- Minimum trade notional is applied to expected fill notional after final quantity sizing and after the rebalance-tolerance check.
+- The minimum-notional threshold uses the adverse side-specific slipped price, excludes fees, suppresses values below the minimum, and allows equality.
+- Skipped continuous-weight orders are not accumulated.
 - Positioning returns a delta order only; execution and portfolio accounting remain separate.
 - Keep fees and slippage separately traceable in records and results.
 - Buy-side slippage increases the fill price; sell-side slippage decreases it.

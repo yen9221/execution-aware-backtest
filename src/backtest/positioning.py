@@ -199,6 +199,7 @@ def market_order_for_target_weight_at_open(
     fee_rate: float,
     slippage_rate: float,
     rebalance_tolerance: float,
+    minimum_trade_notional: float,
 ) -> MarketOrder | None:
     """Size a cost-aware delta order from an execution-open portfolio mark.
 
@@ -207,7 +208,8 @@ def market_order_for_target_weight_at_open(
     Adverse slippage and proportional fees limit buy affordability but do not
     redefine the reference-open target exposure. An absolute current-to-target
     weight deviation less than or equal to ``rebalance_tolerance`` produces no
-    order. Minimum notionals are intentionally absent. A zero-value portfolio
+    order. After final quantity sizing, expected fill notional below
+    ``minimum_trade_notional`` also produces no order. A zero-value portfolio
     returns no order because it has no capital to allocate.
     """
 
@@ -263,6 +265,9 @@ def market_order_for_target_weight_at_open(
             "rebalance_tolerance must satisfy 0 <= rebalance_tolerance <= 1, "
             f"got {rebalance_tolerance_value!r}"
         )
+    minimum_trade_notional_value = _nonnegative_number(
+        "minimum_trade_notional", minimum_trade_notional
+    )
 
     current_asset_value = _finite_calculation(
         "current_asset_value", position * reference
@@ -358,6 +363,26 @@ def market_order_for_target_weight_at_open(
         raise PositioningError(
             "calculated sell quantity exceeds the existing position"
         )
+
+    if side is Side.SELL:
+        expected_fill_price = _finite_calculation(
+            "expected sell fill price", reference * (1 - slippage_rate_value)
+        )
+    if expected_fill_price <= 0:
+        raise PositioningError(
+            "calculated expected fill price must be strictly positive, "
+            f"got {expected_fill_price!r}"
+        )
+    expected_trade_notional = _finite_calculation(
+        "expected trade notional", quantity * expected_fill_price
+    )
+    if expected_trade_notional <= 0:
+        raise PositioningError(
+            "calculated expected trade notional must be strictly positive, "
+            f"got {expected_trade_notional!r}"
+        )
+    if expected_trade_notional < minimum_trade_notional_value:
+        return None
 
     return MarketOrder(
         created_at=decision_timestamp,

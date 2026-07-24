@@ -680,6 +680,7 @@ def convert_weight(
     fee_rate: float = 0.0,
     slippage_rate: float = 0.0,
     rebalance_tolerance: float = 0.0,
+    minimum_trade_notional: float = 0.0,
 ) -> MarketOrder | None:
     return market_order_for_target_weight_at_open(
         state=state,
@@ -689,6 +690,7 @@ def convert_weight(
         fee_rate=fee_rate,
         slippage_rate=slippage_rate,
         rebalance_tolerance=rebalance_tolerance,
+        minimum_trade_notional=minimum_trade_notional,
     )
 
 
@@ -781,6 +783,7 @@ def test_weight_converter_rejects_invalid_state_and_pending_types() -> None:
             fee_rate=0.0,
             slippage_rate=0.0,
             rebalance_tolerance=0.0,
+            minimum_trade_notional=0.0,
         )
     with pytest.raises(PositioningError, match="PendingTargetWeight"):
         market_order_for_target_weight_at_open(
@@ -791,6 +794,7 @@ def test_weight_converter_rejects_invalid_state_and_pending_types() -> None:
             fee_rate=0.0,
             slippage_rate=0.0,
             rebalance_tolerance=0.0,
+            minimum_trade_notional=0.0,
         )
 
 
@@ -1416,3 +1420,289 @@ def test_inside_band_integration_has_no_fill_fee_or_state_change() -> None:
     assert fill is None
     assert final is initial
     assert final.cumulative_fees == 0.0
+
+
+def test_minimum_trade_notional_is_required_and_keyword_only() -> None:
+    kwargs = {
+        "state": PortfolioState(cash=1000.0),
+        "pending_target": pending_weight(0.5),
+        "execution_bar_timestamp": EXECUTION_AT,
+        "reference_open": REFERENCE_OPEN,
+        "fee_rate": 0.0,
+        "slippage_rate": 0.0,
+        "rebalance_tolerance": 0.0,
+    }
+    with pytest.raises(TypeError, match="minimum_trade_notional"):
+        market_order_for_target_weight_at_open(**kwargs)  # type: ignore[arg-type]
+    parameter = inspect.signature(
+        market_order_for_target_weight_at_open
+    ).parameters["minimum_trade_notional"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize("minimum", [0.0, 1.0, 20.0, 1e9])
+def test_valid_minimum_trade_notionals_are_accepted(minimum: float) -> None:
+    result = convert_weight(
+        PortfolioState(cash=600.0, position_quantity=4.0),
+        0.42,
+        minimum_trade_notional=minimum,
+    )
+    assert result is None or isinstance(result, MarketOrder)
+
+
+@pytest.mark.parametrize(
+    "minimum",
+    [
+        -0.01,
+        True,
+        False,
+        "20",
+        None,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+    ],
+)
+def test_invalid_minimum_trade_notionals_are_rejected(minimum: object) -> None:
+    with pytest.raises(PositioningError, match="minimum_trade_notional"):
+        convert_weight(
+            PortfolioState(cash=1000.0),
+            minimum_trade_notional=minimum,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("minimum", "expected_order"),
+    [(21.0, False), (20.400000000000002, True), (20.0, True)],
+)
+def test_buy_minimum_notional_boundary(
+    minimum: float, expected_order: bool
+) -> None:
+    order = convert_weight(
+        PortfolioState(cash=600.0, position_quantity=4.0),
+        0.42,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+        minimum_trade_notional=minimum,
+    )
+    assert (order is not None) is expected_order
+    if order is not None:
+        assert order == MarketOrder(DECISION_AT, Side.BUY, 0.2)
+
+
+@pytest.mark.parametrize(
+    ("minimum", "expected_order"),
+    [(20.0, False), (19.6, True), (19.0, True)],
+)
+def test_sell_minimum_notional_boundary(
+    minimum: float, expected_order: bool
+) -> None:
+    order = convert_weight(
+        PortfolioState(cash=600.0, position_quantity=4.0),
+        0.38,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+        minimum_trade_notional=minimum,
+    )
+    assert (order is not None) is expected_order
+    if order is not None:
+        assert order == MarketOrder(DECISION_AT, Side.SELL, 0.2)
+
+
+def test_minimum_boundary_uses_slipped_notional_and_excludes_fee_and_cash_flow() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    # BUY reference notional is 20.0, slipped notional is 20.4, and cash
+    # outflow including fee is 20.604.
+    assert (
+        convert_weight(
+            state,
+            0.42,
+            fee_rate=0.01,
+            slippage_rate=0.02,
+            rebalance_tolerance=0.01,
+            minimum_trade_notional=20.2,
+        )
+        is not None
+    )
+    assert (
+        convert_weight(
+            state,
+            0.42,
+            fee_rate=0.01,
+            slippage_rate=0.02,
+            rebalance_tolerance=0.01,
+            minimum_trade_notional=20.5,
+        )
+        is None
+    )
+    # SELL reference notional is 20.0 while adverse slipped notional is 19.6.
+    assert (
+        convert_weight(
+            state,
+            0.38,
+            fee_rate=0.01,
+            slippage_rate=0.02,
+            rebalance_tolerance=0.01,
+            minimum_trade_notional=19.8,
+        )
+        is None
+    )
+
+
+def test_minimum_boundary_has_no_hidden_epsilon() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    actual_notional = 0.2 * (REFERENCE_OPEN * 1.02)
+    at_boundary = convert_weight(
+        state,
+        0.42,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+        minimum_trade_notional=actual_notional,
+    )
+    one_step_above = convert_weight(
+        state,
+        0.42,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+        minimum_trade_notional=math.nextafter(actual_notional, math.inf),
+    )
+    assert at_boundary is not None
+    assert one_step_above is None
+
+
+def test_tolerance_suppresses_before_minimum_notional_calculation() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    assert (
+        convert_weight(
+            state,
+            0.405,
+            fee_rate=1e308,
+            slippage_rate=0.9,
+            rebalance_tolerance=0.01,
+            minimum_trade_notional=1e308,
+        )
+        is None
+    )
+
+
+def test_affordability_cap_precedes_minimum_notional_filter() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    base = convert_weight(
+        state,
+        1.0,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        minimum_trade_notional=0.0,
+    )
+    assert base is not None
+    final_notional = base.quantity * (REFERENCE_OPEN * 1.02)
+    permitted = convert_weight(
+        state,
+        1.0,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        minimum_trade_notional=math.nextafter(final_notional, 0.0),
+    )
+    suppressed = convert_weight(
+        state,
+        1.0,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        minimum_trade_notional=math.nextafter(final_notional, math.inf),
+    )
+    assert base.quantity == pytest.approx(600.0 / 103.02)
+    assert base.quantity < 6.0
+    assert permitted == base
+    assert suppressed is None
+
+
+def test_tiny_trade_is_controlled_by_minimum_notional_only_after_tolerance() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    tiny_target = math.nextafter(0.4, 1.0)
+    allowed = convert_weight(
+        state,
+        tiny_target,
+        rebalance_tolerance=0.0,
+        minimum_trade_notional=0.0,
+    )
+    assert allowed is not None
+    tiny_notional = allowed.quantity * REFERENCE_OPEN
+    suppressed = convert_weight(
+        state,
+        tiny_target,
+        rebalance_tolerance=0.0,
+        minimum_trade_notional=math.nextafter(tiny_notional, math.inf),
+    )
+    assert allowed.quantity == 5.684341886080802e-16
+    assert suppressed is None
+
+
+@pytest.mark.parametrize(
+    ("target", "side"), [(0.42, Side.BUY), (0.38, Side.SELL)]
+)
+def test_allowed_minimum_notional_order_executes_and_applies(
+    target: float, side: Side
+) -> None:
+    initial = PortfolioState(cash=600.0, position_quantity=4.0)
+    order = convert_weight(
+        initial,
+        target,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+        minimum_trade_notional=0.0,
+    )
+    assert order is not None and order.side is side
+    fill = execute_market_order(
+        order,
+        executed_at=EXECUTION_AT,
+        reference_price=REFERENCE_OPEN,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+    )
+    final = apply_fill(initial, fill)
+    assert final.cash >= 0
+    assert final.position_quantity >= 0
+    assert final.cumulative_fees == pytest.approx(fill.fee)
+
+
+@pytest.mark.parametrize("target", [0.42, 0.38])
+def test_suppressed_minimum_notional_order_has_no_fill_fee_or_state_change(
+    target: float,
+) -> None:
+    initial = PortfolioState(cash=600.0, position_quantity=4.0)
+    order = convert_weight(
+        initial,
+        target,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+        rebalance_tolerance=0.01,
+        minimum_trade_notional=1e9,
+    )
+    fill = None if order is None else execute_market_order(
+        order,
+        executed_at=EXECUTION_AT,
+        reference_price=REFERENCE_OPEN,
+        fee_rate=0.01,
+        slippage_rate=0.02,
+    )
+    assert order is None
+    assert fill is None
+    assert initial == PortfolioState(cash=600.0, position_quantity=4.0)
+    assert initial.cumulative_fees == 0.0
+
+
+def test_minimum_notional_calls_are_deterministic_and_not_accumulated() -> None:
+    state = PortfolioState(cash=600.0, position_quantity=4.0)
+    first = convert_weight(state, 0.42, minimum_trade_notional=21.0)
+    second = convert_weight(state, 0.42, minimum_trade_notional=21.0)
+    third = convert_weight(state, 0.42, minimum_trade_notional=0.0)
+    assert first is None
+    assert second is None
+    assert third == MarketOrder(DECISION_AT, Side.BUY, 0.2)
+    assert state == PortfolioState(cash=600.0, position_quantity=4.0)
