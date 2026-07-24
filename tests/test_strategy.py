@@ -9,9 +9,18 @@ from backtest.engine import run_backtest
 from backtest.events import Bar
 from backtest.orders import Side
 from backtest.portfolio import PortfolioState
-from backtest.positioning import TargetPosition
+from backtest.positioning import (
+    TargetPosition,
+    TargetWeight,
+    target_position_to_weight,
+    target_weight_to_position,
+)
 from backtest.reporting import build_trade_log, summarize_backtest
-from backtest.strategy import StrategyError, previous_close_momentum_targets
+from backtest.strategy import (
+    StrategyError,
+    previous_close_momentum_targets,
+    previous_close_momentum_target_weights,
+)
 
 START = datetime(2024, 1, 1, tzinfo=timezone.utc)
 FEE_RATE = 0.001
@@ -188,6 +197,83 @@ def test_exact_six_close_hand_check() -> None:
     assert previous_close_momentum_targets(
         bars_from_closes([100.0, 102.0, 101.0, 103.0, 103.0, 99.0])
     ) == EXPECTED_TARGETS
+
+
+def test_exact_six_close_weight_hand_check() -> None:
+    weights = previous_close_momentum_target_weights(
+        bars_from_closes([100.0, 102.0, 101.0, 103.0, 103.0, 99.0])
+    )
+    assert weights == tuple(
+        TargetWeight(weight) for weight in (0.0, 1.0, 0.0, 1.0, 0.0, 0.0)
+    )
+    assert isinstance(weights, tuple)
+    assert all(type(weight) is TargetWeight for weight in weights)
+
+
+@pytest.mark.parametrize(
+    ("closes", "expected_weights"),
+    [
+        ([100.0], (0.0,)),
+        ([100.0, 101.0], (0.0, 1.0)),
+        ([100.0, 100.0], (0.0, 0.0)),
+        ([100.0, 99.0], (0.0, 0.0)),
+    ],
+)
+def test_weight_strategy_endpoint_behavior(
+    closes: list[float], expected_weights: tuple[float, ...]
+) -> None:
+    source_bars = bars_from_closes(closes)
+    original = list(source_bars)
+    first = previous_close_momentum_target_weights(source_bars)
+    second = previous_close_momentum_target_weights(source_bars)
+    assert tuple(target.weight for target in first) == expected_weights
+    assert len(first) == len(source_bars)
+    assert first == second
+    assert source_bars == original
+
+
+def test_weight_targets_exactly_map_existing_binary_targets() -> None:
+    source_bars = integration_bars()
+    binary = previous_close_momentum_targets(source_bars)
+    weights = previous_close_momentum_target_weights(source_bars)
+    assert weights == tuple(target_position_to_weight(target) for target in binary)
+    assert tuple(target_weight_to_position(target) for target in weights) == binary
+
+
+def test_weight_strategy_has_no_fractional_rule() -> None:
+    weights = previous_close_momentum_target_weights(
+        bars_from_closes([100.0, 102.0, 101.0, 103.0])
+    )
+    assert {target.weight for target in weights} <= {0.0, 1.0}
+
+
+def test_changing_future_bars_does_not_change_earlier_weight_targets() -> None:
+    original = bars_from_closes([100.0, 102.0, 101.0, 103.0])
+    changed = bars_from_closes([100.0, 102.0, 1.0, 1_000_000.0])
+    assert previous_close_momentum_target_weights(original)[:2] == (
+        previous_close_momentum_target_weights(changed)[:2]
+    )
+
+
+def test_binary_pipeline_is_identical_after_endpoint_round_trip() -> None:
+    source_bars = integration_bars()
+    binary_targets = previous_close_momentum_targets(source_bars)
+    weight_targets = previous_close_momentum_target_weights(source_bars)
+    round_trip_targets = tuple(
+        target_weight_to_position(target) for target in weight_targets
+    )
+    original_pipeline = run_pipeline(source_bars)
+    round_trip_result = run_backtest(
+        bars=source_bars,
+        targets=round_trip_targets,
+        initial_state=PortfolioState(cash=10_000.0),
+        fee_rate=FEE_RATE,
+        slippage_rate=SLIPPAGE_RATE,
+    )
+    assert round_trip_targets == binary_targets
+    assert round_trip_result == original_pipeline[1]
+    assert build_trade_log(round_trip_result) == original_pipeline[2]
+    assert summarize_backtest(round_trip_result) == original_pipeline[3]
 
 
 def test_outputs_are_target_position_members_not_raw_integers() -> None:

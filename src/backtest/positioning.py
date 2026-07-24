@@ -23,6 +23,32 @@ class TargetPosition(IntEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class TargetWeight:
+    """Immutable intended long allocation for one unlevered asset."""
+
+    weight: float
+
+    def __post_init__(self) -> None:
+        value = self.weight
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise PositioningError(
+                f"weight must be numeric and not boolean, got {value!r}"
+            )
+        number = float(value)
+        if not math.isfinite(number):
+            raise PositioningError(f"weight must be finite, got {value!r}")
+        if not 0.0 <= number <= 1.0:
+            raise PositioningError(
+                f"weight must lie within the inclusive range [0.0, 1.0], got {number!r}"
+            )
+        object.__setattr__(self, "weight", number)
+
+
+CASH_TARGET = TargetWeight(0.0)
+LONG_TARGET = TargetWeight(1.0)
+
+
+@dataclass(frozen=True, slots=True)
 class PendingTarget:
     """A price-free target selected from one completed decision bar."""
 
@@ -85,6 +111,32 @@ def _validated_target(field: str, value: object) -> TargetPosition:
     if not isinstance(value, TargetPosition):
         raise PositioningError(f"{field} must be a TargetPosition, got {value!r}")
     return value
+
+
+def target_position_to_weight(target: TargetPosition) -> TargetWeight:
+    """Convert one supported binary position to its canonical endpoint weight."""
+
+    target_value = _validated_target("target", target)
+    return CASH_TARGET if target_value is TargetPosition.CASH else LONG_TARGET
+
+
+def target_weight_to_position(target: TargetWeight) -> TargetPosition:
+    """Convert an exact endpoint weight for the current binary execution path.
+
+    Fractional weights are valid target representations, but partial rebalance
+    execution is not implemented and therefore cannot be silently coerced.
+    """
+
+    if not isinstance(target, TargetWeight):
+        raise PositioningError(f"target must be a TargetWeight, got {target!r}")
+    if target.weight == 0.0:
+        return TargetPosition.CASH
+    if target.weight == 1.0:
+        return TargetPosition.LONG
+    raise PositioningError(
+        f"fractional target weight {target.weight!r} is not supported by the "
+        "current binary execution path"
+    )
 
 
 def create_pending_target(

@@ -20,6 +20,7 @@
 
 ## Costs, fills, and accounting
 
+- `TargetWeight` is constrained to `[0, 1]`; fractional weights are valid target representations but must not be silently coerced into the current binary execution path.
 - Keep fees and slippage separately traceable in records and results.
 - Buy-side slippage increases the fill price; sell-side slippage decreases it.
 - Track cash, position quantity, and portfolio value explicitly.

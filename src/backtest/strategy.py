@@ -5,7 +5,11 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 
 from backtest.events import Bar
-from backtest.positioning import TargetPosition
+from backtest.positioning import (
+    TargetPosition,
+    TargetWeight,
+    target_position_to_weight,
+)
 
 _BAR_INTERVAL = timedelta(hours=1)
 _STRING_LIKE = (str, bytes, bytearray)
@@ -95,3 +99,14 @@ def previous_close_momentum_targets(
         )
         targets.append(target)
     return tuple(targets)
+
+
+def previous_close_momentum_target_weights(
+    bars: Sequence[Bar],
+) -> tuple[TargetWeight, ...]:
+    """Return endpoint weights for the existing binary momentum baseline."""
+
+    return tuple(
+        target_position_to_weight(target)
+        for target in previous_close_momentum_targets(bars)
+    )

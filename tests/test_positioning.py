@@ -8,11 +8,16 @@ from backtest.execution import Fill, execute_market_order
 from backtest.orders import MarketOrder, Side
 from backtest.portfolio import PortfolioState, apply_fill
 from backtest.positioning import (
+    CASH_TARGET,
+    LONG_TARGET,
     PendingTarget,
     PositioningError,
     TargetPosition,
+    TargetWeight,
     create_pending_target,
     market_order_for_target_at_open,
+    target_position_to_weight,
+    target_weight_to_position,
 )
 
 DECISION_AT = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -20,6 +25,117 @@ EXECUTION_AT = datetime(2024, 1, 1, 1, tzinfo=timezone.utc)
 REFERENCE_OPEN = 100.0
 FEE_RATE = 0.001
 SLIPPAGE_RATE = 0.0005
+
+
+@pytest.mark.parametrize("weight", [0.0, 0.25, 0.5, 0.75, 1.0])
+def test_valid_target_weight_values_are_preserved(weight: float) -> None:
+    target = TargetWeight(weight)
+    assert target.weight == weight
+    assert type(target.weight) is float
+
+
+@pytest.mark.parametrize("weight", [-0.01, -5e-324, 1.01, 1.0000000000000002])
+def test_out_of_range_target_weight_is_rejected_without_clipping(weight: float) -> None:
+    with pytest.raises(PositioningError, match=r"inclusive range \[0\.0, 1\.0\]"):
+        TargetWeight(weight)
+
+
+@pytest.mark.parametrize("weight", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_target_weight_is_rejected(weight: float) -> None:
+    with pytest.raises(PositioningError, match="finite"):
+        TargetWeight(weight)
+
+
+@pytest.mark.parametrize("weight", [True, False])
+def test_boolean_target_weight_is_rejected(weight: bool) -> None:
+    with pytest.raises(PositioningError, match="not boolean"):
+        TargetWeight(weight)
+
+
+@pytest.mark.parametrize("weight", ["0.5", None, object()])
+def test_nonnumeric_target_weight_is_rejected(weight: object) -> None:
+    with pytest.raises(PositioningError, match="numeric"):
+        TargetWeight(weight)  # type: ignore[arg-type]
+
+
+def test_target_weight_is_immutable_and_has_value_equality() -> None:
+    first = TargetWeight(0.5)
+    second = TargetWeight(0.5)
+    assert first == second
+    assert first is not second
+    with pytest.raises(FrozenInstanceError):
+        first.weight = 0.75  # type: ignore[misc]
+
+
+def test_target_weight_does_not_round_valid_values() -> None:
+    weight = 0.12345678901234566
+    assert TargetWeight(weight).weight == weight
+
+
+def test_canonical_endpoint_constants_are_exact_and_immutable() -> None:
+    assert CASH_TARGET == TargetWeight(0.0)
+    assert LONG_TARGET == TargetWeight(1.0)
+    assert CASH_TARGET is not LONG_TARGET
+    with pytest.raises(FrozenInstanceError):
+        CASH_TARGET.weight = 1.0  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        LONG_TARGET.weight = 0.0  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("position", "expected"),
+    [
+        (TargetPosition.CASH, CASH_TARGET),
+        (TargetPosition.LONG, LONG_TARGET),
+    ],
+)
+def test_binary_position_converts_to_exact_endpoint_weight(
+    position: TargetPosition,
+    expected: TargetWeight,
+) -> None:
+    original = position
+    first = target_position_to_weight(position)
+    second = target_position_to_weight(position)
+    assert type(first) is TargetWeight
+    assert first == second == expected
+    assert position is original
+
+
+@pytest.mark.parametrize("invalid", [0, 1, True, "cash", None, TargetWeight(0.0)])
+def test_invalid_raw_target_position_conversion_is_rejected(invalid: object) -> None:
+    with pytest.raises(PositioningError, match="TargetPosition"):
+        target_position_to_weight(invalid)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("weight", "expected"),
+    [(CASH_TARGET, TargetPosition.CASH), (LONG_TARGET, TargetPosition.LONG)],
+)
+def test_endpoint_weight_converts_back_to_binary_position(
+    weight: TargetWeight,
+    expected: TargetPosition,
+) -> None:
+    assert target_weight_to_position(weight) is expected
+
+
+@pytest.mark.parametrize("weight", [0.25, 0.5, 0.75])
+def test_fractional_weight_is_rejected_by_binary_adapter(weight: float) -> None:
+    with pytest.raises(PositioningError, match="fractional.*binary execution"):
+        target_weight_to_position(TargetWeight(weight))
+
+
+@pytest.mark.parametrize("invalid", [0.0, 1.0, None, "0.5", TargetPosition.CASH])
+def test_invalid_raw_weight_conversion_is_rejected(invalid: object) -> None:
+    with pytest.raises(PositioningError, match="TargetWeight"):
+        target_weight_to_position(invalid)  # type: ignore[arg-type]
+
+
+def test_fractional_weight_cannot_enter_pending_binary_target() -> None:
+    with pytest.raises(PositioningError, match="TargetPosition"):
+        create_pending_target(
+            decision_bar_timestamp=DECISION_AT,
+            target=TargetWeight(0.5),  # type: ignore[arg-type]
+        )
 
 
 def pending(target: TargetPosition = TargetPosition.LONG) -> PendingTarget:
