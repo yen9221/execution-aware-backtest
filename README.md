@@ -1,6 +1,6 @@
 # Execution-Aware Backtest
 
-Execution-Aware Backtest is a portfolio-level execution simulation prototype. The project currently provides strict synthetic OHLCV loading, price-free CASH/LONG target intents, a minimal deterministic next-bar execution loop, quantity-based fills, and immutable single-asset long/cash accounting. It is not a production backtester.
+Execution-Aware Backtest is a portfolio-level execution simulation prototype. The project currently provides strict synthetic OHLCV loading, price-free CASH/LONG target intents, a minimal deterministic next-bar execution loop, quantity-based fills, immutable single-asset long/cash accounting, and a separate deterministic reporting layer. It is not a production backtester.
 
 The planned timing convention is to generate signals at a bar close and permit execution only at the next bar open. Same-bar close execution and execution of final-bar signals are non-goals.
 
@@ -47,6 +47,12 @@ Quantity-based market orders are represented by immutable records. `backtest.exe
 
 `backtest.portfolio.apply_fill` returns a new immutable single-asset portfolio state after applying a fill to cash, long position quantity, and cumulative fees. It rejects insufficient cash and insufficient long position; leverage, margin, and short selling are not supported. Fill prices, fees, and slippage are accepted from the execution layer rather than recalculated.
 
+## Deterministic reporting
+
+`backtest.reporting` consumes an already completed immutable `BacktestResult`; it does not modify the result or add calculations to the engine. It provides immutable normalized trade-log records copied from fills and descriptive whole-period summary metrics: cumulative return, signed maximum drawdown, absolute gross fill-notional turnover, average end-of-bar long capital exposure, fees incurred during the run, and buy, sell, and total fill counts.
+
+Initial portfolio value marks initial cash and quantity using the first snapshot close; final value uses the last stored snapshot value. Turnover is normalized by the initial marked value and is not annualized or average daily turnover. Exposure is the arithmetic mean of end-of-bar observations, not an intrabar measure. No Sharpe ratio or annualization is included, and no benchmark or alpha conclusion is made. These diagnostics are descriptive and are not evidence of robust profitability.
+
 ## Not implemented
 
-Models, prediction-to-target policy, thresholds, strategies, signals, pending-order queues, PnL and other performance metrics, configuration loading, CSV output, a command-line interface, notebooks, market-data ingestion, and production backtest behavior are not implemented. Production readiness and profitability assessment are outside the current scope.
+Models, prediction-to-target policy, thresholds, strategies, signals, pending-order queues, benchmark comparison, risk-adjusted or annualized performance metrics, configuration loading, CSV output, a command-line interface, notebooks, market-data ingestion, and production backtest behavior are not implemented. Production readiness and profitability assessment are outside the current scope.
