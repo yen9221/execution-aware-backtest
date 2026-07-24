@@ -16,6 +16,9 @@
 - A signal generated on the final bar must not be executed.
 - Never access future bars when producing a signal or decision.
 - At each bar, process the pending prior-bar target at the current open before recording the current close snapshot and creating the current bar's next target.
+- Binary and continuous-weight engine entry points remain explicit and separate.
+- A continuous target created after bar `t` may execute only at bar `t+1` open; the final continuous target remains unexecuted without a later bar.
+- The continuous engine delegates sizing, rebalance tolerance, and minimum-notional filtering to positioning.
 - Do not silently forward-fill missing OHLC bars. Missing intervals must remain explicit or be handled by a documented, tested policy.
 
 ## Costs, fills, and accounting

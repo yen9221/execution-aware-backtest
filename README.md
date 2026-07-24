@@ -43,11 +43,12 @@ The positioning layer also defines immutable single-asset `TargetWeight` values 
 
 Continuous target-weight sizing retains the pre-trade reference-open allocation definition and calculates ideal exposure quantity from that open. For BUY orders, adverse slippage and the proportional fee are included in the effective unit cash cost used to cap quantity to affordability. SELL quantity remains the reference-open exposure difference, capped by the existing position. The execution and portfolio layers still determine actual fills, fees, cash flows, and account changes.
 
-Because transaction costs reduce portfolio value, realized post-cost weight may differ from the intended target; no implicit post-cost exact-target solver is used. Exact target matching is retained only when both rates are zero. The engine does not consume fractional target weights yet. Existing binary `TargetPosition` conversion and engine behavior remain unchanged, and fractional weights are never silently coerced into that binary path.
+Because transaction costs reduce portfolio value, realized post-cost weight may differ from the intended target; no implicit post-cost exact-target solver is used. Exact target matching is retained only when both rates are zero.
+Existing binary TargetPosition conversion and engine behavior remain unchanged, and fractional weights are never silently coerced into that binary path.
 
 Continuous positioning also accepts an explicit absolute rebalance tolerance. Current weight is calculated from pre-trade portfolio value marked at the execution open, and no order is generated when the absolute current-to-target deviation is less than or equal to the tolerance. A triggered order still sizes toward the exact intended target; the tolerance does not change fee, slippage, affordability, or SELL sizing. A zero tolerance retains the prior exact-match-only behavior.
 
-After tolerance and final cost-aware quantity sizing, continuous positioning applies a required non-negative minimum expected trade notional. BUY expected notional uses the adverse slipped BUY price, while SELL expected notional uses the adverse slipped SELL price. Fees and cash flow are excluded. Expected notional below the minimum is suppressed; equality is allowed, and a zero minimum retains prior behavior. Skipped orders are not accumulated. No post-cost exact-target solver is implemented, fractional engine integration remains pending, and binary behavior remains unchanged.
+After tolerance and final cost-aware quantity sizing, continuous positioning applies a required non-negative minimum expected trade notional. BUY expected notional uses the adverse slipped BUY price, while SELL expected notional uses the adverse slipped SELL price. Fees and cash flow are excluded. Expected notional below the minimum is suppressed; equality is allowed, and a zero minimum retains prior behavior. Skipped orders are not accumulated. No post-cost exact-target solver or fractional strategy is implemented, and binary behavior remains unchanged.
 
 ## Deterministic baseline strategy
 
@@ -58,6 +59,8 @@ This fixed rule has no threshold selection or parameter optimization. It is a wo
 ## Minimal engine
 
 `backtest.engine.run_backtest` consumes one precomputed CASH or LONG target for each completed chronological bar. A target created from bar `t` can execute only at bar `t+1` open; the final bar's target is retained as unexecuted because no later open exists. The engine delegates target conversion, fill calculation, and portfolio accounting to their existing modules, records real fills only, and stores one immutable end-of-bar portfolio snapshot per bar. Portfolio value is marked as cash plus long quantity times that bar's close and is only a state observation, not a performance conclusion. The loop does not perform prediction, threshold selection, strategy generation, performance analysis, or output generation.
+
+`backtest.engine.run_target_weight_backtest` is a separate explicit workflow for precomputed continuous `TargetWeight` values, with exactly one target supplied per bar. It preserves the same close-decision to next-open timing: the first bar cannot execute its own target, target `t` may execute only at bar `t+1` open, and the final target remains unexecuted. Cost-aware sizing, rebalance tolerance, and minimum-notional filtering remain delegated to positioning. Only actual fills are recorded, and each snapshot is marked at the current bar close after any current-open execution. Binary engine behavior remains unchanged. No fractional strategy, post-cost exact-target solver, or multi-asset workflow is implemented.
 
 ## Portfolio accounting
 

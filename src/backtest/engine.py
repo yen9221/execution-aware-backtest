@@ -10,9 +10,13 @@ from backtest.execution import Fill, execute_market_order
 from backtest.portfolio import PortfolioState, apply_fill
 from backtest.positioning import (
     PendingTarget,
+    PendingTargetWeight,
     TargetPosition,
+    TargetWeight,
     create_pending_target,
+    create_pending_target_weight,
     market_order_for_target_at_open,
+    market_order_for_target_weight_at_open,
 )
 
 _BAR_INTERVAL = timedelta(hours=1)
@@ -45,6 +49,17 @@ class BacktestResult:
     fills: tuple[Fill, ...]
     portfolio_history: tuple[PortfolioSnapshot, ...]
     unexecuted_final_target: PendingTarget | None
+
+
+@dataclass(frozen=True, slots=True)
+class TargetWeightBacktestResult:
+    """Immutable history from one explicit continuous-weight engine run."""
+
+    initial_state: PortfolioState
+    final_state: PortfolioState
+    fills: tuple[Fill, ...]
+    portfolio_history: tuple[PortfolioSnapshot, ...]
+    unexecuted_final_target: PendingTargetWeight | None
 
 
 def _utc_timestamp(field: str, value: object) -> datetime:
@@ -151,6 +166,30 @@ def _validate_targets(
     return tuple(validated)
 
 
+def _validate_target_weights(
+    targets: object,
+    *,
+    expected_length: int,
+) -> tuple[TargetWeight, ...]:
+    if isinstance(targets, _STRING_LIKE) or not isinstance(targets, Sequence):
+        raise EngineError(
+            "targets must be a non-string sequence of TargetWeight values"
+        )
+    if len(targets) != expected_length:
+        raise EngineError(
+            f"targets length {len(targets)} must equal bars length {expected_length}"
+        )
+
+    validated: list[TargetWeight] = []
+    for index, target in enumerate(targets):
+        if type(target) is not TargetWeight:
+            raise EngineError(
+                f"targets[{index}] must be a TargetWeight, got {target!r}"
+            )
+        validated.append(target)
+    return tuple(validated)
+
+
 def _validate_initial_state(state: object) -> PortfolioState:
     if not isinstance(state, PortfolioState):
         raise EngineError(f"initial_state must be a PortfolioState, got {state!r}")
@@ -180,6 +219,31 @@ def _validate_rates(
             f"got {tolerance_value!r}"
         )
     return fee, slippage, tolerance_value
+
+
+def _validate_target_weight_controls(
+    *,
+    fee_rate: object,
+    slippage_rate: object,
+    rebalance_tolerance: object,
+    minimum_trade_notional: object,
+) -> tuple[float, float, float, float]:
+    fee = _nonnegative_number("fee_rate", fee_rate)
+    slippage = _finite_number("slippage_rate", slippage_rate)
+    if not 0 <= slippage < 1:
+        raise EngineError(
+            f"slippage_rate must satisfy 0 <= slippage_rate < 1, got {slippage!r}"
+        )
+    rebalance = _finite_number("rebalance_tolerance", rebalance_tolerance)
+    if not 0 <= rebalance <= 1:
+        raise EngineError(
+            "rebalance_tolerance must satisfy 0 <= rebalance_tolerance <= 1, "
+            f"got {rebalance!r}"
+        )
+    minimum = _nonnegative_number(
+        "minimum_trade_notional", minimum_trade_notional
+    )
+    return fee, slippage, rebalance, minimum
 
 
 def run_backtest(
@@ -260,6 +324,90 @@ def run_backtest(
         )
 
     return BacktestResult(
+        initial_state=initial_state,
+        final_state=state,
+        fills=tuple(fills),
+        portfolio_history=tuple(history),
+        unexecuted_final_target=pending_target,
+    )
+
+
+def run_target_weight_backtest(
+    *,
+    bars: Sequence[Bar],
+    targets: Sequence[TargetWeight],
+    initial_state: PortfolioState,
+    fee_rate: float,
+    slippage_rate: float,
+    rebalance_tolerance: float,
+    minimum_trade_notional: float,
+) -> TargetWeightBacktestResult:
+    """Run precomputed continuous targets through the next-open event loop."""
+
+    validated_bars = _validate_bars(bars)
+    validated_targets = _validate_target_weights(
+        targets,
+        expected_length=len(validated_bars),
+    )
+    state = _validate_initial_state(initial_state)
+    fee, slippage, rebalance, minimum = _validate_target_weight_controls(
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
+        rebalance_tolerance=rebalance_tolerance,
+        minimum_trade_notional=minimum_trade_notional,
+    )
+
+    pending_target: PendingTargetWeight | None = None
+    fills: list[Fill] = []
+    history: list[PortfolioSnapshot] = []
+
+    for index, (bar, timestamp, open_price, close_price) in enumerate(validated_bars):
+        if pending_target is not None:
+            order = market_order_for_target_weight_at_open(
+                state=state,
+                pending_target=pending_target,
+                execution_bar_timestamp=timestamp,
+                reference_open=open_price,
+                fee_rate=fee,
+                slippage_rate=slippage,
+                rebalance_tolerance=rebalance,
+                minimum_trade_notional=minimum,
+            )
+            pending_target = None
+            if order is not None:
+                fill = execute_market_order(
+                    order,
+                    executed_at=timestamp,
+                    reference_price=open_price,
+                    fee_rate=fee,
+                    slippage_rate=slippage,
+                )
+                state = apply_fill(state, fill)
+                fills.append(fill)
+
+        portfolio_value = state.cash + state.position_quantity * close_price
+        if not math.isfinite(portfolio_value):
+            raise EngineError(
+                f"bars[{index}] portfolio_value must be finite, got "
+                f"{portfolio_value!r} at {timestamp.isoformat()}"
+            )
+        history.append(
+            PortfolioSnapshot(
+                bar_timestamp=timestamp,
+                cash=state.cash,
+                position_quantity=state.position_quantity,
+                cumulative_fees=state.cumulative_fees,
+                close_price=close_price,
+                portfolio_value=portfolio_value,
+            )
+        )
+
+        pending_target = create_pending_target_weight(
+            decision_bar_timestamp=timestamp,
+            target=validated_targets[index],
+        )
+
+    return TargetWeightBacktestResult(
         initial_state=initial_state,
         final_state=state,
         fills=tuple(fills),
