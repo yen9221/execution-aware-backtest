@@ -66,6 +66,12 @@ Threshold values are inputs to the policy and must be selected outside this modu
 
 Allocation thresholds convert probabilities into intended target weights. They are separate from rebalance tolerance, which decides whether realized weight is close enough to an intended target to avoid a trade, and minimum trade notional, which can suppress an already-sized order. The allocation module does not inspect bars, timestamps, portfolio state, costs, execution controls, orders, fills, or reporting. Synthetic targets produced by the policy pass directly to the existing fractional engine and reporting, where actual fills and realized snapshots remain the source of reported outcomes.
 
+## Prediction timestamp alignment
+
+`backtest.prediction_alignment.align_probabilities_to_bars` validates already-generated timestamped probabilities against completed chronological bars. Repository bar timestamps identify bar opens, and a prediction timestamp identifies that same decision bar: after UTC normalization, prediction `i` must exactly match `bars[i].timestamp`. Alignment is one-to-one and index-preserving. It does not sort, shift, fill, interpolate, drop, deduplicate, or nearest-match observations, and source timestamps are not mutated.
+
+The prediction timestamp is not an execution timestamp. After alignment and separate allocation, the resulting target for bar `t` remains eligible for execution only at the next bar open through the existing engine. The alignment module does not inspect models, features, labels, thresholds, train/validation/test splits, portfolio state, costs, or execution. Synthetic integration validates timestamp and engine compatibility only; successful alignment does not prove feature-level absence of look-ahead or leakage and adds no model inference, threshold selection, or alpha claim.
+
 ## Minimal engine
 
 `backtest.engine.run_backtest` consumes one precomputed CASH or LONG target for each completed chronological bar. A target created from bar `t` can execute only at bar `t+1` open; the final bar's target is retained as unexecuted because no later open exists. The engine delegates target conversion, fill calculation, and portfolio accounting to their existing modules, records real fills only, and stores one immutable end-of-bar portfolio snapshot per bar. Portfolio value is marked as cash plus long quantity times that bar's close and is only a state observation, not a performance conclusion. The loop does not perform prediction, threshold selection, strategy generation, performance analysis, or output generation.

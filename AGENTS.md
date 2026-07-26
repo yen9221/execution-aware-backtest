@@ -26,6 +26,10 @@
 - Allocation policies map already-available model outputs to target intents and remain separate from model fitting, execution, and reporting.
 - Allocation thresholds must be selected outside the allocation module using training/validation data only; final test data must not participate.
 - Allocation thresholds, rebalance tolerance, and minimum trade notional are separate controls with different responsibilities.
+- Prediction timestamps identify completed decision bars, not execution bars.
+- Prediction-to-bar alignment must be exact, one-to-one, chronological, and index-preserving after UTC normalization.
+- Alignment must not sort, shift, fill, interpolate, drop, or nearest-match predictions.
+- Successful timestamp alignment does not by itself prove feature-level absence of look-ahead or leakage.
 
 ## Costs, fills, and accounting
 
