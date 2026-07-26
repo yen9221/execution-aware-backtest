@@ -27,6 +27,138 @@ Python 3.11 or newer is required. From the repository root, use the existing vir
 
 `tests/fixtures/simple_bars.csv` is synthetic and does not reproduce real market data.
 
+## Project workflow
+
+```mermaid
+flowchart LR
+    Bars[Chronological hourly OHLCV bars]
+    Predictions[Timestamped precomputed probabilities]
+    Alignment[Prediction timestamp alignment]
+    Allocation[Probability allocation policy]
+    Target[TargetWeight]
+    Engine[Next-bar backtest engine]
+    Pending[Pending target]
+    Positioning[Next-bar-open positioning]
+    Order{Order or no order}
+    Execution[Market-order execution]
+    Fill[Actual fill]
+    Portfolio[Portfolio accounting]
+    NoTrade[No order]
+    Snapshots[Close-marked portfolio snapshots]
+    Reporting[Descriptive reporting]
+    TradeLog[Trade log and descriptive metrics]
+
+    Bars --> Alignment
+    Predictions --> Alignment
+    Alignment -->|Aligned probabilities| Allocation
+    Allocation --> Target
+    Bars --> Engine
+    Target --> Engine
+    Engine --> Pending
+    Pending --> Positioning
+    Engine -->|Observable next open| Positioning
+    Positioning --> Order
+    Order -->|Order| Execution
+    Order -->|No order| NoTrade
+    Execution --> Fill
+    Fill --> Portfolio
+    NoTrade -->|State unchanged| Portfolio
+    Portfolio --> Snapshots
+    Fill --> Reporting
+    Snapshots --> Reporting
+    Reporting --> TradeLog
+```
+
+## Timing semantics
+
+```mermaid
+sequenceDiagram
+    participant Bt as Bar t
+    participant Research as Feature and model layer
+    participant Align as Alignment
+    participant Allocate as Allocation
+    participant Engine as Backtest engine
+    participant Position as Positioning
+    participant Execute as Execution
+    participant Account as Portfolio accounting
+    participant Bt1 as Bar t+1
+
+    Bt->>Bt: Bar t opens
+    Bt->>Bt: Bar t evolves
+    Bt->>Bt: Bar t closes
+    Bt->>Research: Completed observable bar t
+    Research->>Research: Features and probability become available
+    Research->>Align: Prediction timestamp identifies decision bar t
+    Align->>Allocate: Exact aligned probability
+    Allocate->>Engine: Create target[t] from fixed thresholds
+    Note over Engine,Execute: No execution at bar t close
+    Engine->>Engine: Keep target[t] pending
+    Note over Engine: Final target remains unexecuted if no bar t+1 exists
+    Bt1->>Engine: Bar t+1 opens
+    Engine->>Position: Size pending target using bar t+1 open
+    Position-->>Engine: Market order or no order
+    alt Order produced
+        Engine->>Execute: Execute using bar t+1 open price
+        Execute->>Account: Apply actual fill at bar t+1 open
+    else No order
+        Engine->>Account: Keep portfolio state unchanged
+    end
+    Bt1->>Bt1: Bar t+1 evolves and closes
+    Engine->>Engine: Record portfolio snapshot at bar t+1 close
+```
+
+## Responsibility boundaries
+
+Model evaluation, validation-only threshold selection, allocation mapping, execution filtering, and reporting are separate responsibilities. Final test data does not participate in threshold selection.
+
+```mermaid
+flowchart TB
+    subgraph Research[Research / model layer]
+        Observable[Features from observable completed data]
+        Evaluation[Model evaluation]
+        Thresholds[Validation-only threshold selection]
+        Predictions2[Timestamped predictions]
+        Observable --> Evaluation
+        Evaluation --> Predictions2
+    end
+
+    subgraph AlignmentAllocation[Alignment and allocation layer]
+        Exact[Exact prediction-to-bar alignment]
+        Mapping[Probability-to-TargetWeight mapping]
+        Predictions2 --> Exact
+        Exact --> Mapping
+        Thresholds -->|External fixed inputs| Mapping
+    end
+
+    subgraph ExecutionLayer[Execution layer]
+        Pending2[Pending target]
+        Tolerance[Rebalance tolerance]
+        Sizing[Next-open sizing]
+        Minimum[Minimum trade notional]
+        Costs[Fee and slippage]
+        Accounting[Portfolio accounting with realized exposure]
+        Mapping --> Pending2
+        Pending2 --> Tolerance
+        Tolerance --> Sizing
+        Sizing --> Minimum
+        Minimum --> Costs
+        Costs --> Accounting
+    end
+
+    subgraph ReportingLayer[Reporting layer]
+        ActualFills[Actual fills]
+        Snapshots[Close-marked snapshots]
+        Metrics[Descriptive metrics]
+        ActualFills --> Metrics
+        Snapshots --> Metrics
+    end
+
+    Costs --> ActualFills
+    Accounting --> Snapshots
+```
+
+These diagrams describe workflow and timing contracts only; they do not establish model validity, absence of feature leakage, or trading profitability.
+
 ## Data validation
 
 `backtest.data.load_bars_csv` preserves CSV row order and returns immutable bars with UTC-aware timestamps and floating-point OHLCV values. It rejects malformed schemas, invalid OHLCV values, non-chronological or duplicate timestamps, and timestamps that are not exactly one hour apart. Missing bars are rejected rather than sorted, forward-filled, inferred, or repaired.
