@@ -23,6 +23,9 @@
 - Deterministic strategies may produce target intents only from completed observable bars.
 - Strategy decisions remain separate from execution costs, portfolio state, and no-trade filters.
 - The deterministic fractional strategy is a workflow baseline, not a selected or optimized allocation policy.
+- Allocation policies map already-available model outputs to target intents and remain separate from model fitting, execution, and reporting.
+- Allocation thresholds must be selected outside the allocation module using training/validation data only; final test data must not participate.
+- Allocation thresholds, rebalance tolerance, and minimum trade notional are separate controls with different responsibilities.
 
 ## Costs, fills, and accounting
 

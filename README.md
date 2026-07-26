@@ -58,6 +58,14 @@ After tolerance and final cost-aware quantity sizing, continuous positioning app
 
 These fixed rules have no probability mapping, threshold selection, parameter fitting, or optimization. They are workflow baselines, not evidence of alpha, benchmark superiority, robust profitability, or an optimized allocation policy.
 
+## Probability allocation policy
+
+`backtest.allocation.probabilities_to_target_weights` converts already-generated probabilities into immutable `TargetWeight` values using a fixed three-region rule. Probabilities below the required lower threshold map to `0.0`, probabilities from the lower threshold through the upper threshold inclusive map to `0.5`, and probabilities above the upper threshold map to `1.0`. Input order is preserved, and the policy neither rounds nor clips values.
+
+Threshold values are inputs to the policy and must be selected outside this module using training/validation data only. Final test data must not participate in threshold selection. The module does not fit or select thresholds and adds no model inference, model training, feature or probability generation, threshold optimization, or alpha claim.
+
+Allocation thresholds convert probabilities into intended target weights. They are separate from rebalance tolerance, which decides whether realized weight is close enough to an intended target to avoid a trade, and minimum trade notional, which can suppress an already-sized order. The allocation module does not inspect bars, timestamps, portfolio state, costs, execution controls, orders, fills, or reporting. Synthetic targets produced by the policy pass directly to the existing fractional engine and reporting, where actual fills and realized snapshots remain the source of reported outcomes.
+
 ## Minimal engine
 
 `backtest.engine.run_backtest` consumes one precomputed CASH or LONG target for each completed chronological bar. A target created from bar `t` can execute only at bar `t+1` open; the final bar's target is retained as unexecuted because no later open exists. The engine delegates target conversion, fill calculation, and portfolio accounting to their existing modules, records real fills only, and stores one immutable end-of-bar portfolio snapshot per bar. Portfolio value is marked as cash plus long quantity times that bar's close and is only a state observation, not a performance conclusion. The loop does not perform prediction, threshold selection, strategy generation, performance analysis, or output generation.
@@ -76,4 +84,4 @@ Initial portfolio value marks initial cash and quantity using the first snapshot
 
 ## Not implemented
 
-Models, learned prediction-to-target policy, configurable thresholds, strategy frameworks, signals, pending-order queues, benchmark comparison, risk-adjusted or annualized performance metrics, configuration loading, CSV output, a command-line interface, notebooks, market-data ingestion, and production backtest behavior are not implemented. Production readiness and profitability assessment are outside the current scope.
+Models, learned or optimized prediction-to-target policies, threshold-selection workflows, strategy frameworks, signals, pending-order queues, benchmark comparison, risk-adjusted or annualized performance metrics, configuration loading, CSV output, a command-line interface, notebooks, market-data ingestion, and production backtest behavior are not implemented. Production readiness and profitability assessment are outside the current scope.
