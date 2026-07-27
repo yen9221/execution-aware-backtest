@@ -20,6 +20,8 @@ from backtest.orders import Side
 from backtest.portfolio import PortfolioState
 
 _TOLERANCE = 1e-12
+_FEE_RECONCILIATION_REL_TOLERANCE = 1e-12
+_FEE_RECONCILIATION_ABS_TOLERANCE = 1e-9
 
 
 class ReportingError(ValueError):
@@ -331,7 +333,12 @@ def summarize_backtest(result: ReportingResult) -> BacktestSummary:
     elif run_fees < 0:
         raise ReportingError(f"run fees must be non-negative, got {run_fees!r}")
     fill_fees = _finite_sum("sum of fill fees", tuple(fill.fee for fill, _, _ in fills))
-    if not math.isclose(fill_fees, run_fees, rel_tol=0.0, abs_tol=_TOLERANCE):
+    if not math.isclose(
+        fill_fees,
+        run_fees,
+        rel_tol=_FEE_RECONCILIATION_REL_TOLERANCE,
+        abs_tol=_FEE_RECONCILIATION_ABS_TOLERANCE,
+    ):
         raise ReportingError(
             f"fill fees {fill_fees!r} do not reconcile with cumulative fee change {run_fees!r}"
         )

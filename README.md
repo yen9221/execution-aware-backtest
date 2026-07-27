@@ -29,6 +29,8 @@ Python 3.11 or newer is required. From the repository root, use the existing vir
 
 Stage 6A freezes a separate real-market data prerequisite before any rule-based results are inspected: Binance Public Data Spot `BTCUSDT` hourly bars from `2024-01-01T00:00:00Z` through `2024-12-31T23:00:00Z` (8,784 rows, timestamps denoting bar opens). `scripts/prepare_binance_snapshot.py` downloads only the twelve specified monthly archives, preserves and hashes them, converts their existing order to the project OHLCV schema, and validates the result through the production loader without sorting, filling, interpolation, deduplication, or repair. This snapshot is designated for the future rule-based demonstration and is not eligible as an untouched future ML final-test period; Stage 6A runs no strategy or backtest and inspects no performance result.
 
+Stage 6 runs the fixed previous-close fractional rule on that frozen real-market hourly snapshot using completed closes only and next-bar-open execution, with fee and slippage assumptions fixed in advance. Execution-aligned buy-and-hold and zero-position baselines use the same engine and costs. Formal outputs preserve metadata, target timing, actual fills, realized portfolio history, and descriptive summaries. No parameter is tuned from observed performance; the inspected period is not an untouched future ML final test, and the results do not establish alpha, momentum validity, robust profitability, or production readiness.
+
 ## Project workflow
 
 ```mermaid

@@ -497,6 +497,60 @@ def test_material_fee_mismatch_and_negative_run_fees_are_rejected() -> None:
         )
 
 
+def test_multi_fill_machine_precision_fee_residual_is_accepted() -> None:
+    fills = (
+        fill(index=1, fee=0.1),
+        fill(index=2, fee=0.2),
+        fill(index=3, fee=0.3),
+    )
+    cumulative_fee_change = math.fsum(item.fee for item in fills) + 3.6e-12
+    summary = summarize_backtest(
+        result(
+            fills=fills,
+            final=PortfolioState(
+                cash=1_000.0,
+                cumulative_fees=cumulative_fee_change,
+            ),
+        )
+    )
+    assert summary.total_fees == cumulative_fee_change
+    assert abs(
+        math.fsum(item.fee for item in fills) - summary.total_fees
+    ) == pytest.approx(3.6e-12)
+
+
+def test_meaningful_fee_reconciliation_mismatch_is_rejected() -> None:
+    fills = (fill(index=1, fee=0.25), fill(index=2, fee=0.25))
+    with pytest.raises(ReportingError, match="do not reconcile"):
+        summarize_backtest(
+            result(
+                fills=fills,
+                final=PortfolioState(cash=1_000.0, cumulative_fees=0.500001),
+            )
+        )
+
+
+def test_exact_multi_fill_fee_reconciliation_still_passes() -> None:
+    fills = (fill(index=1, fee=0.25), fill(index=2, fee=0.25))
+    summary = summarize_backtest(
+        result(
+            fills=fills,
+            final=PortfolioState(cash=1_000.0, cumulative_fees=0.5),
+        )
+    )
+    assert summary.total_fees == 0.5
+
+
+def test_non_finite_fee_remains_rejected_by_summary_validation() -> None:
+    with pytest.raises(ReportingError, match=r"result\.fills\[0\]\.fee must be finite"):
+        summarize_backtest(
+            result(
+                fills=(replace(fill(), fee=math.nan),),
+                final=PortfolioState(cash=1_000.0),
+            )
+        )
+
+
 def test_overflowing_fill_fee_sum_is_reported_as_reporting_error() -> None:
     first = replace(fill(index=1), fee=1e308)
     second = replace(fill(index=2), fee=1e308)

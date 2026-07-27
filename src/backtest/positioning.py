@@ -9,6 +9,7 @@ from backtest.orders import MarketOrder, Side
 from backtest.portfolio import PortfolioState
 
 _MAX_TOLERANCE = 1e-6
+_MAX_BUY_AFFORDABILITY_ADJUSTMENTS = 16
 
 
 class PositioningError(ValueError):
@@ -329,8 +330,13 @@ def market_order_for_target_weight_at_open(
         expected_cash_outflow = _finite_calculation(
             "expected buy cash outflow", expected_notional + expected_fee
         )
-        if expected_cash_outflow > cash:
+        affordability_adjustments = 0
+        while (
+            expected_cash_outflow > cash
+            and affordability_adjustments < _MAX_BUY_AFFORDABILITY_ADJUSTMENTS
+        ):
             quantity = math.nextafter(quantity, 0.0)
+            affordability_adjustments += 1
             expected_notional = _finite_calculation(
                 "adjusted expected buy notional", quantity * expected_fill_price
             )

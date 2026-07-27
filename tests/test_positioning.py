@@ -1177,6 +1177,53 @@ def test_cost_aware_buy_nextafter_is_conditional_and_deterministic() -> None:
     assert unbound is not None and unbound.quantity == 3.0
 
 
+def test_stage_6_full_weight_buy_uses_two_float_steps_and_remains_affordable() -> None:
+    state = PortfolioState(cash=1000.0)
+    decision_at = datetime(2024, 1, 1, 1, tzinfo=timezone.utc)
+    execution_at = datetime(2024, 1, 1, 2, tzinfo=timezone.utc)
+    reference_open = 42613.57
+    fee_rate = 0.001
+    slippage_rate = 0.0005
+    raw_maximum = state.cash / (
+        reference_open * (1 + slippage_rate) * (1 + fee_rate)
+    )
+
+    order = convert_weight(
+        state,
+        1.0,
+        pending_target=create_pending_target_weight(
+            decision_bar_timestamp=decision_at,
+            target=TargetWeight(1.0),
+        ),
+        execution_bar_timestamp=execution_at,
+        reference_open=reference_open,
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
+    )
+
+    assert order is not None
+    assert order.side is Side.BUY
+    one_step_quantity = math.nextafter(raw_maximum, 0.0)
+    expected_fill_price = reference_open * (1 + slippage_rate)
+    one_step_notional = one_step_quantity * expected_fill_price
+    assert one_step_notional + one_step_notional * fee_rate > state.cash
+    assert order.quantity == math.nextafter(one_step_quantity, 0.0)
+
+    fill = execute_market_order(
+        order,
+        executed_at=execution_at,
+        reference_price=reference_open,
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
+    )
+    expected_cash_requirement = fill.notional + fill.fee
+    assert expected_cash_requirement <= state.cash
+
+    final = apply_fill(state, fill)
+    assert final.cash == 0.0
+    assert final.cash >= 0.0
+
+
 def test_cost_aware_central_partial_sell_execution_and_accounting() -> None:
     initial, order, fill, final = execute_cost_aware_central(0.25)
     assert order == MarketOrder(DECISION_AT, Side.SELL, 1.5)
