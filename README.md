@@ -31,6 +31,8 @@ Stage 6A freezes a separate real-market data prerequisite before any rule-based 
 
 Stage 6 runs the fixed previous-close fractional rule on that frozen real-market hourly snapshot using completed closes only and next-bar-open execution, with fee and slippage assumptions fixed in advance. Execution-aligned buy-and-hold and zero-position baselines use the same engine and costs. Formal outputs preserve metadata, target timing, actual fills, realized portfolio history, and descriptive summaries. No parameter is tuned from observed performance; the inspected period is not an untouched future ML final test, and the results do not establish alpha, momentum validity, robust profitability, or production readiness.
 
+Stage 7 defines a strict model-agnostic loader for immutable prediction CSV artifacts. Each prediction row contains a completed decision-bar timestamp, symbol, probability, model ID, and period label; separate metadata records the exact file checksum, model and data identifiers, period bounds, row count, and generation information. Predictions must align one-to-one with completed bars, with no timestamp shifting, sorting, filling, interpolation, clipping, deduplication, or nearest matching. Loading probabilities remains separate from allocation mapping and backtest execution. No real ML artifact has been integrated, and this schema stage validates neither a model nor a signal. Final-test predictions must remain frozen and must not participate in policy, threshold, feature, model, parameter, cap, or mapping selection.
+
 ## Project workflow
 
 ```mermaid
@@ -173,7 +175,7 @@ Quantity-based market orders are represented by immutable records. `backtest.exe
 
 ## Target positioning
 
-`backtest.positioning.PendingTarget` represents an already-determined CASH or LONG target independently from any model output. It is created after a completed decision bar and stores only that bar's timestamp and the target; it contains no future price or quantity. `market_order_for_target_at_open` converts the intent into a quantity-based market order, or `None`, only when the next execution-bar open is observable. All-in buy affordability includes adverse directional slippage and the proportional fee, with a one-float-step conservative sizing buffer. Repeated CASH or LONG targets produce no trade, and an existing long position is not rebalanced. The positioning layer itself contains no model, threshold, strategy, fill execution, or portfolio mutation.
+`backtest.positioning.PendingTarget` represents an already-determined CASH or LONG target independently from any model output. It is created after a completed decision bar and stores only that bar's timestamp and the target; it contains no future price or quantity. `market_order_for_target_at_open` converts the intent into a quantity-based market order, or `None`, only when the next execution-bar open is observable. All-in buy affordability includes adverse directional slippage and the proportional fee. If floating-point evaluation leaves a machine-precision cash excess, quantity is conservatively adjusted downward by a small bounded number of float steps until the strict affordability invariant is satisfied. Repeated CASH or LONG targets produce no trade, and an existing long position is not rebalanced. The positioning layer itself contains no model, threshold, strategy, fill execution, or portfolio mutation.
 
 The positioning layer also defines immutable single-asset `TargetWeight` values constrained to `[0.0, 1.0]`: `0.0` represents fully cash, `1.0` represents fully long, and intermediate values represent intended partial long exposure. `PendingTargetWeight` retains a price-free continuous target until the execution-bar open is observable. `market_order_for_target_weight_at_open` then values the existing position and the pre-trade portfolio at that open and can return a partial BUY or SELL delta order. It does not execute the order, create a fill, or mutate the portfolio; the existing execution and portfolio layers remain responsible for fills and account changes.
 
@@ -236,4 +238,8 @@ Initial portfolio value marks initial cash and quantity using the first snapshot
 
 ## Not implemented
 
-Models, learned or optimized prediction-to-target policies, threshold-selection workflows, strategy frameworks, signals, pending-order queues, benchmark comparison, risk-adjusted or annualized performance metrics, configuration loading, CSV output, a command-line interface, notebooks, market-data ingestion, and production backtest behavior are not implemented. Production readiness and profitability assessment are outside the current scope.
+## Not implemented
+
+Model training or inference, learned or optimized prediction-to-target policies, threshold-selection workflows, general-purpose strategy configuration, multi-asset execution, short selling, leverage, order-book simulation, market impact, partial fills, live market-data ingestion, and production trading are not implemented.
+
+The repository includes task-specific data-preparation and demonstration scripts with deterministic CSV outputs, but it does not provide a general-purpose backtesting CLI or configuration framework.
