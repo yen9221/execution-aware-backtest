@@ -27,6 +27,8 @@ Python 3.11 or newer is required. From the repository root, use the existing vir
 
 `tests/fixtures/simple_bars.csv` is synthetic and does not reproduce real market data.
 
+Stage 6A freezes a separate real-market data prerequisite before any rule-based results are inspected: Binance Public Data Spot `BTCUSDT` hourly bars from `2024-01-01T00:00:00Z` through `2024-12-31T23:00:00Z` (8,784 rows, timestamps denoting bar opens). `scripts/prepare_binance_snapshot.py` downloads only the twelve specified monthly archives, preserves and hashes them, converts their existing order to the project OHLCV schema, and validates the result through the production loader without sorting, filling, interpolation, deduplication, or repair. This snapshot is designated for the future rule-based demonstration and is not eligible as an untouched future ML final-test period; Stage 6A runs no strategy or backtest and inspects no performance result.
+
 ## Project workflow
 
 ```mermaid
