@@ -48,3 +48,6 @@ Thumbs.db
 
 # Local review evidence
 artifacts/codex_review/
+
+# data files
+data/
