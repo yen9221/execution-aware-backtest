@@ -69,3 +69,23 @@ def probabilities_to_target_weights(
         weights.append(TargetWeight(weight))
 
     return tuple(weights)
+
+
+def probabilities_to_continuous_target_weights(
+    probabilities: Sequence[float],
+) -> tuple[TargetWeight, ...]:
+    """Map precomputed probabilities through a fixed linear long-only policy."""
+
+    if isinstance(probabilities, _STRING_LIKE) or not isinstance(
+        probabilities, Sequence
+    ):
+        raise AllocationError("probabilities must be a non-string sequence")
+    if len(probabilities) == 0:
+        raise AllocationError("probabilities must contain at least one value")
+
+    weights: list[TargetWeight] = []
+    for index, value in enumerate(probabilities):
+        probability = _probability_value(f"probabilities[{index}]", value)
+        weight = min(1.0, max(0.0, 2.0 * probability - 1.0))
+        weights.append(TargetWeight(weight))
+    return tuple(weights)

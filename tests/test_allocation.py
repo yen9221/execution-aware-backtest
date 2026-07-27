@@ -6,7 +6,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import backtest.allocation as allocation_module
-from backtest.allocation import AllocationError, probabilities_to_target_weights
+from backtest.allocation import (
+    AllocationError,
+    probabilities_to_continuous_target_weights,
+    probabilities_to_target_weights,
+)
 from backtest.engine import run_target_weight_backtest
 from backtest.events import Bar
 from backtest.portfolio import PortfolioState
@@ -42,6 +46,122 @@ def allocate(values: object, lower: object = 0.4, upper: object = 0.7):
         lower_threshold=lower,  # type: ignore[arg-type]
         upper_threshold=upper,  # type: ignore[arg-type]
     )
+
+
+def continuous_allocate(values: object):
+    return probabilities_to_continuous_target_weights(
+        values,  # type: ignore[arg-type]
+    )
+
+
+def test_continuous_public_api_signature() -> None:
+    assert callable(probabilities_to_continuous_target_weights)
+    signature = inspect.signature(probabilities_to_continuous_target_weights)
+    assert tuple(signature.parameters) == ("probabilities",)
+    assert signature.parameters["probabilities"].default is inspect.Parameter.empty
+
+
+def test_continuous_hand_check_output_contract_and_determinism() -> None:
+    source = [0.0, 0.25, 0.5, 0.6, 0.75, 0.9, 1.0]
+    original = source.copy()
+    first = continuous_allocate(source)
+    second = continuous_allocate(source)
+    assert type(first) is tuple
+    assert len(first) == len(source)
+    assert all(type(value) is TargetWeight for value in first)
+    assert weights(first) == pytest.approx((0.0, 0.0, 0.0, 0.2, 0.5, 0.8, 1.0))
+    assert first == second
+    assert source == original
+    with pytest.raises(TypeError):
+        first[0] = TargetWeight(1.0)  # type: ignore[index]
+    with pytest.raises(FrozenInstanceError):
+        first[0].weight = 1.0  # type: ignore[misc]
+
+
+def test_continuous_mapping_preserves_input_order() -> None:
+    assert weights(continuous_allocate((0.9, 0.6, 1.0, 0.5))) == pytest.approx(
+        (0.8, 0.2, 1.0, 0.0)
+    )
+
+
+@pytest.mark.parametrize("probability", [0.0, 0.1, 0.25, 0.5])
+def test_continuous_probabilities_at_or_below_half_map_to_zero(
+    probability: float,
+) -> None:
+    assert continuous_allocate((probability,)) == (TargetWeight(0.0),)
+
+
+@pytest.mark.parametrize(
+    ("probability", "expected"),
+    [(0.6, 0.2), (0.75, 0.5), (0.9, 0.8)],
+)
+def test_continuous_representative_interior_weights(
+    probability: float, expected: float
+) -> None:
+    assert weights(continuous_allocate((probability,))) == pytest.approx((expected,))
+
+
+def test_continuous_mapping_is_monotonic_non_decreasing() -> None:
+    probabilities = (0.0, 0.25, 0.5, 0.5001, 0.6, 0.75, 0.9, 1.0)
+    mapped = weights(continuous_allocate(probabilities))
+    assert all(left <= right for left, right in zip(mapped, mapped[1:]))
+
+
+def test_continuous_integer_endpoints_become_float_weights() -> None:
+    result = continuous_allocate((0, 1))
+    assert weights(result) == (0.0, 1.0)
+    assert all(type(value.weight) is float for value in result)
+
+
+def test_continuous_empty_sequence_is_rejected() -> None:
+    with pytest.raises(AllocationError, match="at least one"):
+        continuous_allocate([])
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [None, 1, 0.5, object(), {"p": 0.5}, {0.5}, (x for x in [0.5]),
+     "0.5", b"0.5", bytearray(b"0.5")],
+)
+def test_continuous_invalid_containers_are_rejected(invalid: object) -> None:
+    with pytest.raises(AllocationError, match="probabilities must be a non-string sequence"):
+        continuous_allocate(invalid)
+
+
+@pytest.mark.parametrize("invalid", [True, False, "0.5", None, object()])
+def test_continuous_non_numeric_or_boolean_values_are_rejected(invalid: object) -> None:
+    with pytest.raises(AllocationError, match=r"probabilities\[1\].*numeric and not boolean"):
+        continuous_allocate((0.5, invalid))
+
+
+@pytest.mark.parametrize("invalid", [math.nan, math.inf, -math.inf])
+def test_continuous_non_finite_values_are_rejected(invalid: float) -> None:
+    with pytest.raises(AllocationError, match=r"probabilities\[1\].*finite"):
+        continuous_allocate((0.5, invalid))
+
+
+@pytest.mark.parametrize("invalid", [-0.01, 1.01])
+def test_continuous_out_of_range_values_are_rejected_not_clipped(invalid: float) -> None:
+    with pytest.raises(AllocationError, match=r"probabilities\[1\].*inclusive range"):
+        continuous_allocate((0.5, invalid))
+
+
+def test_continuous_addition_does_not_change_three_state_policy() -> None:
+    assert weights(allocate((0.2, 0.4, 0.55, 0.7, 0.9))) == (
+        0.0, 0.5, 0.5, 0.5, 1.0
+    )
+
+
+def test_continuous_source_respects_responsibility_boundaries() -> None:
+    source = inspect.getsource(probabilities_to_continuous_target_weights).lower()
+    for forbidden in (
+        "bar", "timestamp", "alignment", "model", "feature", "label",
+        "threshold", "train", "validation", "test split", "portfolio", "fee",
+        "slippage", "rebalance", "notional", "max_weight", "order", "fill",
+        "engine", "reporting", "csv", "pathlib", "open(", "metric", "alpha",
+        "profit",
+    ):
+        assert forbidden not in source
 
 
 def test_public_api_signature_and_types() -> None:
