@@ -37,6 +37,10 @@ Stage 8 defines a strict machine-readable pre-registration schema for the existi
 
 Stage 9 records that the existing BTC/ETH signal-validation workflow uses daily data while this execution and prediction-artifact workflow uses hourly bars, so the available daily outputs are not directly compatible with exact hourly alignment. No daily-to-hourly forward filling, duplication, interpolation, nearest matching, timestamp shifting, or relabeling is used. Real ML integration is deliberately deferred until the separate ML workflow generates a genuine frozen hourly prediction artifact. This compatibility decision is neither model evaluation nor signal rejection, and Stage 9 executes no model or backtest.
 
+## Evaluation
+
+The final descriptive evaluation of the frozen rule-based real-market demonstration is documented in [`docs/final_descriptive_evaluation.md`](docs/final_descriptive_evaluation.md). It interprets the existing Stage 6 outputs without rerunning the experiment or changing any frozen policy or execution assumption.
+
 ## Project workflow
 
 ```mermaid
