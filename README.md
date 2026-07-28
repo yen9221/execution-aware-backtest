@@ -35,6 +35,8 @@ Stage 7 defines a strict model-agnostic loader for immutable prediction CSV arti
 
 Stage 8 defines a strict machine-readable pre-registration schema for the existing predefined continuous linear long-only allocation policy, without executing that mapping. No probability threshold is used. The specification freezes full permitted exposure, costs, rebalance controls, next-bar timing, execution-aligned buy-and-hold and zero-position baselines, expected output schemas, and prohibitions on performance-based policy changes. A complete freeze must identify and reconcile one immutable prediction artifact. No real ML prediction artifact currently exists here, so final Stage 9 eligibility has not been established; Stage 8 runs no model and no backtest. After final-result inspection, a changed policy requires a new experiment identity and explicit non-final diagnostic status and cannot replace the frozen final result.
 
+Stage 9 records that the existing BTC/ETH signal-validation workflow uses daily data while this execution and prediction-artifact workflow uses hourly bars, so the available daily outputs are not directly compatible with exact hourly alignment. No daily-to-hourly forward filling, duplication, interpolation, nearest matching, timestamp shifting, or relabeling is used. Real ML integration is deliberately deferred until the separate ML workflow generates a genuine frozen hourly prediction artifact. This compatibility decision is neither model evaluation nor signal rejection, and Stage 9 executes no model or backtest.
+
 ## Project workflow
 
 ```mermaid
@@ -237,8 +239,6 @@ The prediction timestamp is not an execution timestamp. After alignment and sepa
 `backtest.reporting` consumes an already completed immutable binary `BacktestResult` or continuous `TargetWeightBacktestResult`; it does not modify the result or add calculations to the engine. Both result types use the same immutable normalized trade-log records copied from actual fills and the same descriptive whole-period summary metrics: cumulative return, signed maximum drawdown, absolute gross fill-notional turnover, average end-of-bar long capital exposure, fees incurred during the run, and buy, sell, and total fill counts. Suppressed targets create no records or fees, and the final unexecuted target does not affect metrics.
 
 Initial portfolio value marks initial cash and quantity using the first snapshot close; final value uses the last stored snapshot value. Turnover is normalized by the initial marked value and is not annualized or average daily turnover. Exposure is the arithmetic mean of actual close-marked portfolio holdings, not intended target weights or an intrabar measure; fractional exposures therefore arise naturally from realized positions. No Sharpe ratio or annualization is included, and no benchmark or alpha conclusion is made. These diagnostics are descriptive and are not evidence of robust profitability.
-
-## Not implemented
 
 ## Not implemented
 
